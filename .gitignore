@@ -1,0 +1,22 @@
+node_modules/
+dist/
+dist-artifacts/
+src-tauri/target/
+.DS_Store
+.latex-workbench/
+
+# Datos de la instalación anterior; se conservan localmente, no pertenecen al código.
+data/
+
+# Archivos auxiliares de proyectos LaTeX usados durante desarrollo.
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.toc

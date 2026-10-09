@@ -1,0 +1,25 @@
+[package]
+name = "latex-workbench"
+version = "0.1.0"
+description = "A fast, general-purpose LaTeX workbench"
+authors = ["Latex Workbench contributors"]
+edition = "2024"
+
+[lib]
+name = "latex_workbench_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+blake3 = "1.8"
+ignore = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "time"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+

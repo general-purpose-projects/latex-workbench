@@ -1,0 +1,27 @@
+name: Error
+description: Reportar un comportamiento incorrecto
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Descripción
+      description: Explica qué ocurrió y qué esperabas.
+    validations:
+      required: true
+  - type: input
+    id: engine
+    attributes:
+      label: Motor y versión
+      placeholder: LuaLaTeX 1.21 / TeX Live 2025
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproducción mínima
+      description: Incluye un proyecto mínimo si es posible.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Registro relevante
+      render: text
