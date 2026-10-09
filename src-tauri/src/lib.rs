@@ -1,19 +1,43 @@
 use blake3::Hasher;
 use ignore::{DirEntry, WalkBuilder};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU32, Ordering},
+    },
     time::{Duration, Instant},
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tokio::{process::Command, time::timeout};
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 const BUILD_DIR: &str = ".latex-workbench";
 const MAX_PROJECT_FILES: usize = 10_000;
+
+struct TerminalSession {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+}
+
+#[derive(Default)]
+struct TerminalState {
+    next_id: AtomicU32,
+    sessions: Mutex<HashMap<u32, TerminalSession>>,
+}
+
+#[derive(Clone, Serialize)]
+struct TerminalOutput {
+    id: u32,
+    data: String,
+}
 
 #[derive(Debug, thiserror::Error)]
 enum AppError {
@@ -607,10 +631,141 @@ async fn git_action(project_root: String, action: String) -> Result<GitResult, A
     })
 }
 
+#[tauri::command]
+fn start_terminal(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, TerminalState>,
+    project_root: String,
+) -> Result<u32, AppError> {
+    let root = canonical_root(&project_root)?;
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let mut command = CommandBuilder::new(shell);
+    command.cwd(root);
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    drop(pair.slave);
+
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    let id = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+    let writer = Arc::new(Mutex::new(writer));
+    let master = Arc::new(Mutex::new(pair.master));
+    state
+        .sessions
+        .lock()
+        .map_err(|_| AppError::Message("No se pudo bloquear la terminal".into()))?
+        .insert(
+            id,
+            TerminalSession {
+                writer,
+                master,
+                child,
+            },
+        );
+
+    std::thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(size) => {
+                    let data = String::from_utf8_lossy(&buffer[..size]).into_owned();
+                    let _ = app.emit("terminal-output", TerminalOutput { id, data });
+                }
+            }
+        }
+    });
+    Ok(id)
+}
+
+#[tauri::command]
+fn write_terminal(
+    state: tauri::State<'_, TerminalState>,
+    id: u32,
+    data: String,
+) -> Result<(), AppError> {
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| AppError::Message("No se pudo bloquear la terminal".into()))?;
+    let session = sessions
+        .get(&id)
+        .ok_or_else(|| AppError::Message("La terminal ya no está disponible".into()))?;
+    let mut writer = session
+        .writer
+        .lock()
+        .map_err(|_| AppError::Message("No se pudo escribir en la terminal".into()))?;
+    writer.write_all(data.as_bytes())?;
+    writer.flush()?;
+    Ok(())
+}
+
+#[tauri::command]
+fn resize_terminal(
+    state: tauri::State<'_, TerminalState>,
+    id: u32,
+    cols: u16,
+    rows: u16,
+) -> Result<(), AppError> {
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| AppError::Message("No se pudo bloquear la terminal".into()))?;
+    let session = sessions
+        .get(&id)
+        .ok_or_else(|| AppError::Message("La terminal ya no está disponible".into()))?;
+    session
+        .master
+        .lock()
+        .map_err(|_| AppError::Message("No se pudo redimensionar la terminal".into()))?
+        .resize(PtySize {
+            rows: rows.max(2),
+            cols: cols.max(2),
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| AppError::Message(error.to_string()))
+}
+
+#[tauri::command]
+fn stop_terminal(state: tauri::State<'_, TerminalState>, id: u32) -> Result<(), AppError> {
+    if let Some(mut session) = state
+        .sessions
+        .lock()
+        .map_err(|_| AppError::Message("No se pudo bloquear la terminal".into()))?
+        .remove(&id)
+    {
+        session
+            .child
+            .kill()
+            .map_err(|error| AppError::Message(error.to_string()))?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(TerminalState::default())
         .setup(|app| {
             if cfg!(debug_assertions)
                 && let Some(window) = app.get_webview_window("main")
@@ -627,7 +782,11 @@ pub fn run() {
             compile_project,
             export_pdf,
             export_sources,
-            git_action
+            git_action,
+            start_terminal,
+            write_terminal,
+            resize_terminal,
+            stop_terminal
         ])
         .run(tauri::generate_context!())
         .expect("error al iniciar Latex Workbench");

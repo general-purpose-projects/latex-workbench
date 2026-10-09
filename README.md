@@ -11,7 +11,9 @@ La versión `0.1.0` es un MVP funcional. Incluye:
 - LuaLaTeX, XeLaTeX, pdfLaTeX, Latexmk y Tectonic cuando estén instalados;
 - perfiles rápidos `Preview` y completos `Release`;
 - caché BLAKE3 de compilaciones sin cambios;
-- visor PDF integrado;
+- paneles redimensionables y árbol de archivos plegable con scroll;
+- visor PDF propio con navegación, zoom, ajuste al ancho y ajuste al alto;
+- terminal PTY integrada, abierta en la raíz del proyecto, para usar Git y otras herramientas;
 - Git status, fetch, pull y push;
 - exportación del PDF y del código fuente en ZIP;
 - `shell-escape` desactivado por defecto.
