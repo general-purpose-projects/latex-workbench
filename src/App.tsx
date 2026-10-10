@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { latex } from "codemirror-lang-latex";
 import { invoke } from "@tauri-apps/api/core";
@@ -10,7 +10,6 @@ import {
   Box,
   Check,
   ChevronDown,
-  CircleAlert,
   Code2,
   Copy,
   Download,
@@ -62,6 +61,9 @@ type BuildResult = {
 };
 
 type BuildLogChunk = { data: string; stream: "stdout" | "stderr" };
+type LogLevel = "error" | "warning" | "info";
+type LogFilter = "all" | LogLevel;
+type LogEntry = { id: number; level: LogLevel; message: string };
 
 const SOURCE_EXTENSIONS = ["tex", "bib", "cls", "sty", "bst", "txt", "md", "toml"];
 
@@ -72,6 +74,33 @@ function basename(path: string) {
 function isEditable(path: string) {
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
   return SOURCE_EXTENSIONS.includes(extension);
+}
+
+function logLevel(message: string): LogLevel {
+  if (
+    /^\s*!/.test(message)
+    || /^\s*(?:ERROR|FATAL)\b/i.test(message)
+    || /\b(?:LaTeX|Package\s+\S+|Biber|Latexmk)\s+Error\b/i.test(message)
+    || /\b(?:Fatal error|Emergency stop|Traceback|TypeError|No PDF)\b/i.test(message)
+    || /\b(?:failed|failure|Errors, so I did not)\b/i.test(message)
+  ) {
+    return "error";
+  }
+  if (
+    /\bwarnings?\b/i.test(message)
+    || /^\s*WARN\b/i.test(message)
+    || /\b(?:Overfull|Underfull)\b/.test(message)
+    || /\bundefined (?:reference|references|citation|citations)\b/i.test(message)
+    || /\brerun (?:LaTeX|Biber)\b/i.test(message)
+  ) {
+    return "warning";
+  }
+  return "info";
+}
+
+function classifyLog(value: string): LogEntry[] {
+  if (!value) return [];
+  return value.split("\n").map((message, id) => ({ id, level: logLevel(message), message }));
 }
 
 export default function App() {
@@ -96,10 +125,20 @@ export default function App() {
   const [bottomTab, setBottomTab] = useState<"build" | "terminal">("build");
   const [terminalStarted, setTerminalStarted] = useState(false);
   const [liveLog, setLiveLog] = useState("");
+  const [logFilter, setLogFilter] = useState<LogFilter>("all");
   const logScrollRef = useRef<HTMLDivElement>(null);
 
   const dirty = content !== savedContent;
   const availableEngines = engines.filter((item) => item.available);
+  const currentLog = building ? liveLog : (build?.log ?? "");
+  const logEntries = useMemo(() => classifyLog(currentLog), [currentLog]);
+  const logCounts = useMemo(() => logEntries.reduce(
+    (counts, entry) => ({ ...counts, [entry.level]: counts[entry.level] + 1 }),
+    { error: 0, warning: 0, info: 0 } as Record<LogLevel, number>,
+  ), [logEntries]);
+  const visibleLogEntries = logFilter === "all"
+    ? logEntries
+    : logEntries.filter((entry) => entry.level === logFilter);
   useEffect(() => {
     invoke<Engine[]>("list_engines").then((items) => {
       setEngines(items);
@@ -199,6 +238,7 @@ export default function App() {
     if (dirty && !(await saveCurrent())) return;
     setBuilding(true);
     setLiveLog("Iniciando compilación…\n");
+    setLogFilter("all");
     setBottomOpen(true);
     setBottomTab("build");
     try {
@@ -481,7 +521,9 @@ export default function App() {
                     onClick={() => setBottomTab("build")}
                   >
                     Compilación
-                    {build?.diagnostics.length ? <span>{build.diagnostics.length}</span> : null}
+                    {logCounts.error + logCounts.warning > 0
+                      ? <span>{logCounts.error + logCounts.warning}</span>
+                      : null}
                   </button>
                   <button
                     className={bottomTab === "terminal" ? "active" : ""}
@@ -497,6 +539,25 @@ export default function App() {
                   <button className="bottom-close" onClick={() => setBottomOpen(false)} title="Cerrar panel"><X size={15} /></button>
                 </div>
               </div>
+              {bottomTab === "build" && (
+                <div className="log-filters" role="toolbar" aria-label="Filtrar registro de compilación">
+                  {([
+                    ["all", "Todos", logEntries.length],
+                    ["error", "Errores", logCounts.error],
+                    ["warning", "Advertencias", logCounts.warning],
+                    ["info", "Info", logCounts.info],
+                  ] as const).map(([filter, label, count]) => (
+                    <button
+                      key={filter}
+                      className={`${filter} ${logFilter === filter ? "active" : ""}`}
+                      onClick={() => setLogFilter(filter)}
+                      aria-pressed={logFilter === filter}
+                    >
+                      {label} <span>{count}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <div
                 ref={logScrollRef}
                 className={`bottom-content ${bottomTab === "build" ? "" : "hidden"}`}
@@ -504,12 +565,17 @@ export default function App() {
                 aria-label="Registro de compilación"
               >
                 {gitOutput && <pre className="git-output"><Github size={14} /> {gitOutput}</pre>}
-                {!building && build?.diagnostics.map((item, index) => (
-                  <div key={`${item.message}-${index}`} className={`diagnostic ${item.severity}`}>
-                    <CircleAlert size={15} /> <span>{item.message}</span>
+                {currentLog ? (
+                  <div className="build-log" role="log" aria-live="polite">
+                    {visibleLogEntries.map((entry) => (
+                      <div key={entry.id} className={`log-line ${entry.level}`}>
+                        <span className="log-level">{entry.level === "error" ? "ERROR" : entry.level === "warning" ? "WARN" : "INFO"}</span>
+                        <span className="log-message">{entry.message || " "}</span>
+                      </div>
+                    ))}
+                    {!visibleLogEntries.length && <div className="log-empty">No hay mensajes en esta categoría.</div>}
                   </div>
-                ))}
-                <pre className="build-log">{building ? liveLog : (build?.log ?? "Listo para compilar.")}</pre>
+                ) : <div className="log-empty">Listo para compilar.</div>}
               </div>
               {terminalStarted && (
                 <div className={`terminal-panel ${bottomTab === "terminal" ? "" : "hidden"}`}>
