@@ -478,25 +478,34 @@ fn build_command(
 }
 
 #[cfg(unix)]
-fn configure_python_compatibility(command: &mut Command, root: &Path) -> Result<(), AppError> {
+fn configure_runtime_compatibility(
+    command: &mut Command,
+    root: &Path,
+    app: Option<&tauri::AppHandle>,
+) -> Result<(), AppError> {
     use std::os::unix::fs::PermissionsExt;
+
+    let bin_dir = app
+        .and_then(|app| app.path().app_cache_dir().ok())
+        .unwrap_or_else(|| root.join(BUILD_DIR))
+        .join("runtime-bin");
+    fs::create_dir_all(&bin_dir)?;
 
     let python = ["python3.13", "python3.12", "python3.11"]
         .into_iter()
         .find_map(find_executable);
-    let Some(python) = python else {
-        return Ok(());
-    };
-    let bin_dir = root.join(BUILD_DIR).join("runtime-bin");
-    fs::create_dir_all(&bin_dir)?;
-    let shim = bin_dir.join("python3");
-    fs::write(
-        &shim,
-        format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", python.display()),
-    )?;
-    let mut permissions = fs::metadata(&shim)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&shim, permissions)?;
+    if let Some(python) = python {
+        let shim = bin_dir.join("python3");
+        fs::write(
+            &shim,
+            format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", python.display()),
+        )?;
+        let mut permissions = fs::metadata(&shim)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&shim, permissions)?;
+    }
+
+    install_compatible_biber(&bin_dir)?;
 
     let mut paths = vec![bin_dir];
     if let Some(existing) = std::env::var_os("PATH") {
@@ -509,7 +518,54 @@ fn configure_python_compatibility(command: &mut Command, root: &Path) -> Result<
 }
 
 #[cfg(not(unix))]
-fn configure_python_compatibility(_command: &mut Command, _root: &Path) -> Result<(), AppError> {
+fn configure_runtime_compatibility(
+    _command: &mut Command,
+    _root: &Path,
+    _app: Option<&tauri::AppHandle>,
+) -> Result<(), AppError> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_compatible_biber(bin_dir: &Path) -> Result<(), AppError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let destination = bin_dir.join("biber");
+    if fs::metadata(&destination)
+        .map(|metadata| metadata.len() > 0)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let Some(source) = find_executable("biber") else {
+        return Ok(());
+    };
+    let architecture = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x86_64",
+        _ => return Ok(()),
+    };
+    let pending = bin_dir.join("biber.pending");
+    let _ = fs::remove_file(&pending);
+    let result = std::process::Command::new("/usr/bin/lipo")
+        .args(["-thin", architecture])
+        .arg(source)
+        .arg("-output")
+        .arg(&pending)
+        .status();
+    if result.map(|status| status.success()).unwrap_or(false) {
+        let mut permissions = fs::metadata(&pending)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&pending, permissions)?;
+        fs::rename(pending, destination)?;
+    } else {
+        let _ = fs::remove_file(pending);
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn install_compatible_biber(_bin_dir: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
@@ -657,7 +713,7 @@ async fn compile_project_inner(
     let (program, args) = build_command(&request, &output_dir, &document_path)?;
     let mut command = Command::new(program);
     command.args(args).current_dir(&root);
-    configure_python_compatibility(&mut command, &root)?;
+    configure_runtime_compatibility(&mut command, &root, app.as_ref())?;
     let (status, log) = run_build_command(command, app).await?;
     let pdf_generated = pdf_path.is_file();
     let success = status.success() && pdf_generated;
