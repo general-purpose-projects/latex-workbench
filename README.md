@@ -1,51 +1,90 @@
 # Latex Workbench
 
-Aplicación de escritorio local para editar, compilar y exportar proyectos LaTeX generales. La interfaz sigue el flujo de tres paneles de Overleaf, pero trabaja directamente sobre carpetas y repositorios Git.
+Latex Workbench es una aplicación de escritorio local para editar, compilar y exportar proyectos LaTeX. Ofrece un flujo de trabajo de tres paneles inspirado en Overleaf, pero trabaja directamente con carpetas locales y repositorios Git: tus fuentes y recursos permanecen en tu equipo.
 
-## Estado
+## Arquitectura
 
-La versión `0.1.0` es un MVP funcional. Incluye:
+```mermaid
+flowchart LR
+    subgraph Desktop["Aplicación de escritorio (Tauri 2)"]
+        UI["Interfaz React + TypeScript"]
+        Editor["CodeMirror<br/>Editor LaTeX / BibTeX"]
+        Files["Árbol de archivos<br/>y esquema del documento"]
+        Preview["Visor PDF<br/>y previsualizador de imágenes"]
+        Terminal["Terminal integrada<br/>(PTY)"]
+        UI --> Editor
+        UI --> Files
+        UI --> Preview
+        UI --> Terminal
+        Bridge["API de Tauri<br/>invoke / eventos"]
+        UI <--> Bridge
+        Core["Backend Rust"]
+        Bridge <--> Core
+    end
 
-- detección de documentos raíz mediante `\\documentclass`;
-- edición LaTeX con la gramática de CodeMirror basada en Overleaf;
-- LuaLaTeX, XeLaTeX, pdfLaTeX, Latexmk y Tectonic cuando estén instalados;
-- perfiles `Preview` y `Release` con Latexmk incremental para resolver referencias, bibliografía e índices; Preview reutiliza auxiliares y sólo repite las herramientas necesarias;
-- caché BLAKE3 de compilaciones sin cambios;
-- paneles redimensionables y árbol de archivos plegable con scroll;
-- visor PDF propio de alta densidad con navegación, zoom que conserva la página, ajuste al ancho y ajuste al alto;
-- previsualización de PNG, JPEG, GIF, WebP y SVG, e inserción sin recomprimir el archivo original;
-- iconos por tipo de archivo, esquema de secciones navegable y miga de pan;
-- terminal PTY integrada, abierta en la raíz del proyecto, para usar Git y otras herramientas;
-- Git status, fetch, pull y push;
-- exportación del PDF y del código fuente en ZIP, con Descargas como destino predeterminado;
-- `shell-escape` desactivado por defecto.
+    Project["Carpetas y archivos<br/>del proyecto local"]
+    TeX["Motores y herramientas LaTeX<br/>LuaLaTeX, XeLaTeX, pdfLaTeX,<br/>Latexmk o Tectonic"]
+    Cache["Caché privada de la aplicación<br/>PDF, auxiliares y resultados"]
+    Git["Git instalado<br/>status, fetch, pull y push"]
+    Export["Exportaciones<br/>PDF y ZIP de fuentes"]
 
-## Desarrollo
+    Files <--> Project
+    Core <--> Project
+    Core --> TeX
+    TeX --> Cache
+    Core <--> Cache
+    Terminal <--> Git
+    Core --> Export
+    Cache --> Preview
+```
 
-Requisitos: Node.js, pnpm, Rust estable y al menos un compilador LaTeX.
+La interfaz React se comunica con el backend Rust mediante comandos y eventos de Tauri. El backend lee y modifica archivos del proyecto, ejecuta las herramientas LaTeX disponibles y mantiene los artefactos de compilación en la caché de la aplicación, fuera de la carpeta del proyecto. La terminal integrada permite usar Git y otras herramientas desde la raíz del proyecto.
+
+## Instalación para desarrollo
+
+### Requisitos
+
+- Node.js LTS y pnpm 11. El proyecto declara pnpm `11.25.0` en `package.json`; puedes habilitar pnpm con Corepack (`corepack enable`).
+- Rust estable instalado con [rustup](https://rustup.rs/).
+- Dependencias de desarrollo nativas de [Tauri 2](https://v2.tauri.app/start/prerequisites/). En macOS se requieren Xcode Command Line Tools; en Windows, Microsoft C++ Build Tools y WebView2; en Linux, las bibliotecas WebKitGTK y AppIndicator correspondientes a tu distribución.
+- Al menos un motor LaTeX compatible instalado y accesible desde `PATH`. LuaLaTeX es el motor seleccionado inicialmente; también se admiten XeLaTeX, pdfLaTeX, Latexmk y Tectonic cuando están instalados.
+
+Instala una distribución TeX que incluya los paquetes requeridos por tus documentos. Por ejemplo, puedes usar MacTeX en macOS, MiKTeX en Windows o TeX Live en Linux. Consulta la guía oficial de [requisitos de Tauri](https://v2.tauri.app/start/prerequisites/) para los detalles y paquetes de tu sistema operativo.
+
+### Obtener el código y ejecutar
 
 ```bash
+git clone https://github.com/general-purpose-projects/latex-workbench.git
+cd latex-workbench
 pnpm install
 pnpm tauri dev
 ```
 
-Generar la aplicación:
+Para crear los instaladores de producción para la plataforma actual:
 
 ```bash
 pnpm tauri build
 ```
 
-El producto no impone estructura a los proyectos del usuario. Una carpeta puede contener uno o varios documentos raíz y cualquier organización de archivos válida para LaTeX.
+El frontend se puede comprobar por separado con:
 
-## Rendimiento
+```bash
+pnpm check
+pnpm build
+```
 
-Los resultados y auxiliares se guardan en la caché privada de Latex Workbench fuera del proyecto. La huella de compilación incluye contenidos, motor y configuración de seguridad. Si nada cambió, el PDF se recupera sin iniciar TeX; cuando algo cambia, Latexmk reutiliza los auxiliares y ejecuta todas las etapas necesarias hasta converger.
+## Funciones principales
 
-## Seguridad
+- Detecta documentos raíz buscando `\\documentclass` y permite trabajar con proyectos de cualquier estructura.
+- Edita fuentes LaTeX y bibliografía BibTeX con CodeMirror.
+- Compila con LuaLaTeX, XeLaTeX, pdfLaTeX, Latexmk o Tectonic, si están disponibles.
+- Ofrece perfiles Preview y Release con Latexmk, compilación incremental y caché BLAKE3.
+- Incluye un visor PDF, navegación por secciones, árbol de archivos y previsualización de imágenes.
+- Integra una terminal PTY y acciones de Git para consultar el estado, hacer fetch, pull y push.
+- Exporta el PDF y las fuentes del proyecto en archivos ZIP.
+- Mantiene `shell-escape` desactivado de forma predeterminada. Actívalo solo para documentos de confianza, ya que permite ejecutar programas externos.
 
-`shell-escape` permite a documentos LaTeX ejecutar programas externos. Sólo debe activarse en repositorios de confianza. Una futura versión incorporará aislamiento adicional para documentos no confiables.
-
-Los archivos temporales que produce el paquete `svg` al convertir imágenes con Inkscape también se redirigen a esa caché privada. Los SVG originales permanecen en el proyecto y no se modifican.
+Los resultados y archivos auxiliares se guardan en la caché privada de Latex Workbench fuera del proyecto. Cuando no hay cambios relevantes, el PDF se recupera sin iniciar TeX; cuando los hay, Latexmk reutiliza los auxiliares y ejecuta las etapas necesarias para completar la compilación.
 
 ## Licencia
 
