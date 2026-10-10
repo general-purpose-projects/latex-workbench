@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { EditorView } from "@codemirror/view";
+import { tags } from "@lezer/highlight";
 import { latex } from "codemirror-lang-latex";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -10,6 +13,7 @@ import {
   Box,
   Check,
   ChevronDown,
+  ChevronRight,
   Code2,
   Copy,
   Download,
@@ -64,6 +68,7 @@ type BuildLogChunk = { data: string; stream: "stdout" | "stderr" };
 type LogLevel = "error" | "warning" | "info";
 type LogFilter = "all" | LogLevel;
 type LogEntry = { id: number; level: LogLevel; message: string };
+type OutlineItem = { command: string; level: number; line: number; title: string };
 
 const SOURCE_EXTENSIONS = ["tex", "bib", "cls", "sty", "bst", "txt", "md", "toml"];
 
@@ -103,6 +108,79 @@ function classifyLog(value: string): LogEntry[] {
   return value.split("\n").map((message, id) => ({ id, level: logLevel(message), message }));
 }
 
+const outlineLevels: Record<string, number> = {
+  part: 0,
+  chapter: 0,
+  section: 1,
+  subsection: 2,
+  subsubsection: 3,
+  paragraph: 4,
+  subparagraph: 5,
+};
+
+function cleanOutlineTitle(value: string) {
+  let title = value.replace(/\\texorpdfstring\{([^{}]*)\}\{[^{}]*\}/g, "$1");
+  for (let pass = 0; pass < 3; pass += 1) {
+    title = title.replace(/\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?\{([^{}]*)\}/g, "$1");
+  }
+  return title
+    .replace(/\\[a-zA-Z@]+\*?/g, "")
+    .replace(/[{}]/g, "")
+    .replace(/~/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseOutline(value: string): OutlineItem[] {
+  const items: OutlineItem[] = [];
+  value.split("\n").forEach((sourceLine, index) => {
+    const line = sourceLine.replace(/(?<!\\)%.*$/, "");
+    const match = line.match(/^\s*\\(part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?\s*(?:\[[^\]]*\]\s*)?\{/);
+    if (!match) return;
+    const openingBrace = match[0].lastIndexOf("{");
+    let depth = 1;
+    let title = "";
+    for (let position = openingBrace + 1; position < line.length; position += 1) {
+      const character = line[position];
+      if (character === "{" && line[position - 1] !== "\\") depth += 1;
+      if (character === "}" && line[position - 1] !== "\\") depth -= 1;
+      if (depth === 0) break;
+      title += character;
+    }
+    const cleanedTitle = cleanOutlineTitle(title);
+    if (cleanedTitle) {
+      items.push({
+        command: match[1],
+        level: outlineLevels[match[1]],
+        line: index + 1,
+        title: cleanedTitle,
+      });
+    }
+  });
+  return items;
+}
+
+const overleafEditorTheme = EditorView.theme({
+  "&": { backgroundColor: "#ffffff", color: "#171717" },
+  ".cm-content": { caretColor: "#111111" },
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "#111111" },
+  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
+    backgroundColor: "#cfe3f6",
+  },
+  ".cm-activeLine": { backgroundColor: "#edf6fc" },
+  ".cm-activeLineGutter": { backgroundColor: "#e4f0f7", color: "#39434a" },
+});
+
+const overleafHighlightStyle = HighlightStyle.define([
+  { tag: [tags.keyword, tags.heading], color: "#0000e6" },
+  { tag: [tags.className, tags.variableName], color: "#27869b" },
+  { tag: [tags.operator, tags.processingInstruction], color: "#6f3ca0" },
+  { tag: tags.comment, color: "#2f7d32", fontStyle: "italic" },
+  { tag: [tags.string, tags.meta], color: "#a31515" },
+  { tag: tags.number, color: "#202020" },
+  { tag: tags.invalid, color: "#c62828", textDecoration: "underline" },
+]);
+
 export default function App() {
   const [engines, setEngines] = useState<Engine[]>([]);
   const [engine, setEngine] = useState("lualatex");
@@ -126,7 +204,10 @@ export default function App() {
   const [terminalStarted, setTerminalStarted] = useState(false);
   const [liveLog, setLiveLog] = useState("");
   const [logFilter, setLogFilter] = useState<LogFilter>("all");
+  const [outlineOpen, setOutlineOpen] = useState(true);
+  const [cursorLine, setCursorLine] = useState(1);
   const logScrollRef = useRef<HTMLDivElement>(null);
+  const editorViewRef = useRef<EditorView | null>(null);
 
   const dirty = content !== savedContent;
   const availableEngines = engines.filter((item) => item.available);
@@ -139,6 +220,26 @@ export default function App() {
   const visibleLogEntries = logFilter === "all"
     ? logEntries
     : logEntries.filter((entry) => entry.level === logFilter);
+  const outline = useMemo(() => parseOutline(content), [content]);
+  const activeOutlineLine = useMemo(() => {
+    let active: number | null = null;
+    for (const item of outline) {
+      if (item.line > cursorLine) break;
+      active = item.line;
+    }
+    return active;
+  }, [cursorLine, outline]);
+  const editorExtensions = useMemo(() => [
+    latex({ fileName: activeFile ?? "document.tex" }),
+    EditorView.lineWrapping,
+    overleafEditorTheme,
+    syntaxHighlighting(overleafHighlightStyle),
+    EditorView.updateListener.of((update) => {
+      if (update.selectionSet || update.docChanged) {
+        setCursorLine(update.state.doc.lineAt(update.state.selection.main.head).number);
+      }
+    }),
+  ], [activeFile]);
   useEffect(() => {
     invoke<Engine[]>("list_engines").then((items) => {
       setEngines(items);
@@ -167,6 +268,7 @@ export default function App() {
       setActiveFile(path);
       setContent(value);
       setSavedContent(value);
+      setCursorLine(1);
     } catch (error) {
       showNotice(String(error));
     }
@@ -270,6 +372,18 @@ export default function App() {
       setBuilding(false);
     }
   }, [building, dirty, documentRoot, engine, profile, project, saveCurrent, shellEscape]);
+
+  const jumpToOutline = useCallback((item: OutlineItem) => {
+    const view = editorViewRef.current;
+    if (!view || item.line > view.state.doc.lines) return;
+    const line = view.state.doc.line(item.line);
+    view.dispatch({
+      selection: { anchor: line.from },
+      effects: EditorView.scrollIntoView(line.from, { y: "start", yMargin: 24 }),
+    });
+    view.focus();
+    setCursorLine(item.line);
+  }, []);
 
   const copyLogs = useCallback(async () => {
     const value = building ? liveLog : (build?.log ?? gitOutput);
@@ -455,6 +569,38 @@ export default function App() {
           </div>
           <div className="sidebar-title"><span>ARCHIVOS</span><button onClick={chooseProject}><Folder size={14} /></button></div>
           <FileTree key={project.root} files={project.files} activeFile={activeFile} onOpen={loadFile} />
+          <section className={`file-outline ${outlineOpen ? "open" : "collapsed"}`}>
+            <button
+              className="outline-title"
+              onClick={() => setOutlineOpen((value) => !value)}
+              aria-expanded={outlineOpen}
+            >
+              {outlineOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              <BookOpen size={14} />
+              <span>ESQUEMA DEL ARCHIVO</span>
+              <small>{outline.length}</small>
+            </button>
+            {outlineOpen && (
+              <div className="outline-tree" role="tree" aria-label="Secciones del archivo actual">
+                {outline.length ? outline.map((item) => (
+                  <button
+                    key={`${item.line}-${item.command}`}
+                    className={`outline-row ${activeOutlineLine === item.line ? "active" : ""}`}
+                    style={{ paddingLeft: 11 + item.level * 15 }}
+                    onClick={() => jumpToOutline(item)}
+                    title={`${item.title} · línea ${item.line}`}
+                    role="treeitem"
+                    aria-level={item.level + 1}
+                  >
+                    <span>{item.title}</span>
+                    <small>{item.line}</small>
+                  </button>
+                )) : (
+                  <p>No hay capítulos ni secciones en este archivo.</p>
+                )}
+              </div>
+            )}
+          </section>
           <label className="security-toggle" title="Permite ejecutar herramientas externas. Actívalo sólo en proyectos de confianza.">
             <input type="checkbox" checked={shellEscape} onChange={(event) => setShellEscape(event.target.checked)} />
             <span>Shell escape</span>
@@ -475,10 +621,12 @@ export default function App() {
           </div>
           {activeFile ? (
             <CodeMirror
+              key={activeFile}
               className="editor-codemirror"
               value={content}
               height="100%"
-              extensions={[latex({ fileName: activeFile })]}
+              extensions={editorExtensions}
+              onCreateEditor={(view) => { editorViewRef.current = view; }}
               onChange={setContent}
               theme="light"
               basicSetup={{
