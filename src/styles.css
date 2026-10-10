@@ -31,7 +31,16 @@ button { cursor: pointer; }
 .welcome-card { width: min(620px, 88vw); padding: 56px; border: 1px solid rgba(23, 107, 75, .16); background: rgba(255,255,255,.82); box-shadow: 0 30px 90px rgba(24, 55, 40, .12); border-radius: 22px; backdrop-filter: blur(20px); }
 .brand-mark { width: 58px; height: 58px; display: grid; place-items: center; color: white; background: var(--forest); border-radius: 16px; box-shadow: 0 12px 28px rgba(23,107,75,.25); margin-bottom: 30px; }
 .eyebrow { letter-spacing: .18em; font-weight: 750; font-size: 11px; color: var(--forest); }
-.welcome-card h1 { font-family: Georgia, serif; font-size: clamp(42px, 7vw, 66px); line-height: .98; letter-spacing: -.045em; margin: 16px 0 22px; font-weight: 500; }
+.welcome-card h1 {
+  max-width: 540px;
+  margin: 22px 0 26px;
+  font-family: Georgia, serif;
+  font-size: clamp(40px, 6vw, 60px);
+  font-weight: 500;
+  line-height: 1.12;
+  letter-spacing: -.012em;
+  text-wrap: balance;
+}
 .welcome-card p { color: var(--muted); font-size: 17px; line-height: 1.65; max-width: 490px; }
 .primary, .secondary { border: 0; border-radius: 9px; display: inline-flex; align-items: center; gap: 9px; font-weight: 700; }
 .primary { background: var(--forest); color: white; }
@@ -86,17 +95,19 @@ body.is-resizing { user-select: none; }
 body.resize-sidebar, body.resize-editor { cursor: col-resize; }
 body.resize-bottom { cursor: row-resize; }
 .sidebar-title { height: 34px; min-height: 34px; padding: 0 10px 0 13px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; font-weight: 800; letter-spacing: .08em; color: #aeb8c4; }
-.sidebar-title button { border: 0; background: transparent; color: #b9c3ce; }
+.sidebar-title button { height: 25px; padding: 0 6px; display: flex; align-items: center; gap: 5px; border: 0; border-radius: 4px; background: transparent; color: #d7dee6; font-size: 10px; letter-spacing: 0; }
+.sidebar-title button:hover { color: white; background: #2d3847; }
 .file-tree { min-height: 90px; overflow: auto; overscroll-behavior: contain; flex: 1 1 auto; padding: 2px 0; scrollbar-gutter: stable; }
 .file-row { border: 0; background: transparent; width: 100%; min-height: 27px; display: flex; align-items: center; gap: 6px; color: #d5dbe2; font-size: 12px; text-align: left; padding-right: 8px; }
 .file-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-row:hover { background: #2a3441; }.file-row.active { color: white; background: #17663e; font-weight: 650; }
+.file-row:hover { background: #2a3441; }.file-row.active { color: white; background: #34445b; font-weight: 650; }
 .tree-chevron { width: 13px; min-width: 13px; display: grid; place-items: center; color: #9ea9b6; }
-.file-type-badge { width: 27px; min-width: 27px; height: 15px; display: inline-grid; place-items: center; overflow: visible !important; border-radius: 3px; color: white; background: #697583; font-size: 7px; font-weight: 850; line-height: 1; letter-spacing: -.02em; }
-.file-type-badge.tex { background: #2b7bbb; }.file-type-badge.bib { background: #8c5cb2; }
-.file-type-badge.style { background: #60717f; }.file-type-badge.pdf { background: #c44949; }
-.file-type-badge.image { background: #b06e24; }.file-type-badge.text { background: #4e8068; }
-.file-type-badge.config { background: #697583; }.file-type-badge.other { background: #59636f; }
+.tree-file-icon { width: 16px; min-width: 16px; stroke-width: 1.8; color: #b9c4d1; }
+.tree-file-icon.tex { color: #5eb5e6; }.tree-file-icon.bibliography { color: #d6a64b; }
+.tree-file-icon.image { color: #b794e8; }.tree-file-icon.pdf { color: #e56c70; }
+.tree-file-icon.code { color: #75b8c8; }.tree-file-icon.table { color: #63b487; }
+.tree-file-icon.config { color: #aeb8c4; }.tree-file-icon.text { color: #b9c4d1; }
+.file-row.active .tree-file-icon { color: white; }
 .file-tree::-webkit-scrollbar, .outline-tree::-webkit-scrollbar { width: 10px; background: #1b222c; }
 .file-tree::-webkit-scrollbar-thumb, .outline-tree::-webkit-scrollbar-thumb { border: 2px solid #1b222c; border-radius: 7px; background: #69758a; }
 .file-outline { max-height: 42%; min-height: 35px; flex: 0 1 230px; display: flex; flex-direction: column; border-top: 4px solid #59657a; background: #1b222c; }
@@ -109,7 +120,7 @@ body.resize-bottom { cursor: row-resize; }
 .outline-tree p { margin: 7px 8px; color: #96a2b0; font-size: 11px; line-height: 1.45; }
 .outline-row { width: 100%; min-height: 29px; padding-right: 7px; display: flex; align-items: center; gap: 7px; border: 0; border-left: 1px solid #596579; color: #d9dfe6; background: transparent; font-size: 12px; text-align: left; }
 .outline-row:hover { background: #293441; }
-.outline-row.active { color: white; background: #17663e; border-left-color: #34b47c; border-radius: 5px; }
+.outline-row.active { color: white; background: #34445b; border-left-color: #9aa9bc; border-radius: 5px; }
 .outline-row span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .outline-row small { color: #929eab; font-size: 9px; font-variant-numeric: tabular-nums; }
 .outline-row.active small { color: #d8eee2; }
@@ -123,9 +134,6 @@ body.resize-bottom { cursor: row-resize; }
 .breadcrumbs { min-width: 0; display: flex; align-items: center; gap: 4px; overflow: hidden; color: #aeb9c4; white-space: nowrap; }
 .breadcrumbs > span { min-width: 0; display: flex; align-items: center; gap: 3px; overflow: hidden; text-overflow: ellipsis; }
 .breadcrumbs > span.current { color: #f2f5f7; font-weight: 700; }
-.pane-header-actions { display: flex; align-items: center; gap: 9px; flex: none; }
-.pane-header-actions button { height: 25px; padding: 0 7px; display: flex; align-items: center; gap: 5px; border: 1px solid #4b5868; border-radius: 5px; color: #e1e7ec; background: #2a3441; font-size: 10px; }
-.pane-header-actions button:hover { background: #354252; }
 .dirty-dot { color: #d49a36; font-size: 9px; }
 .editor-codemirror { position: relative; width: 100%; height: 0; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; contain: size layout paint; }
 .editor-codemirror .cm-editor { position: absolute; inset: 0; width: 100%; height: auto !important; max-height: 100%; overflow: hidden; font-size: 13px; }
@@ -142,20 +150,21 @@ body.resize-bottom { cursor: row-resize; }
 .asset-preview span { position: absolute; right: 10px; bottom: 9px; padding: 4px 7px; border-radius: 4px; color: #e8eee9; background: rgba(28,38,33,.78); font-size: 9px; }
 .pdf-pane { background: #e7e9e6; }
 .pdf-viewer { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.pdf-toolbar { position: relative; z-index: 4; min-height: 42px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 5px 7px; overflow: visible; color: #edf3ef; background: #26352e; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
-.pdf-toolbar button { width: 28px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 5px; color: inherit; background: transparent; }
+.pdf-toolbar { position: relative; z-index: 4; min-height: 44px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 5px 6px; overflow: visible; color: #f3f5f8; background: #2f3c52; box-shadow: 0 1px 4px rgba(0,0,0,.24); font-size: 13px; }
+.pdf-toolbar button { width: 27px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 4px; color: inherit; background: transparent; }
 .pdf-toolbar button:hover { background: rgba(255,255,255,.11); }
 .pdf-toolbar button:disabled { opacity: .35; cursor: default; }
-.pdf-control-group { min-height: 32px; display: flex; align-items: center; gap: 2px; padding: 1px 3px; border: 1px solid #53635b; border-radius: 7px; background: #202d27; }
-.page-control { display: flex; align-items: center; gap: 5px; font-size: 12px; }
-.page-control input { width: 42px; height: 30px; border: 1px solid #718078; border-radius: 5px; color: white; background: #1d2923; text-align: center; }
+.pdf-control-group { min-width: 0; min-height: 34px; flex: 0 0 auto; display: flex; align-items: center; gap: 3px; padding: 0; white-space: nowrap; }
+.pdf-control-group + .pdf-control-group { padding-left: 8px; border-left: 1px solid #617087; }
+.page-control { min-width: 78px; flex: 0 0 auto; display: flex; align-items: center; gap: 5px; font-size: 13px; white-space: nowrap; }
+.page-control input { width: 40px; height: 32px; flex: 0 0 40px; border: 1px solid #8894a5; border-radius: 5px; color: white; background: #222d3e; text-align: center; font-weight: 650; }
 .zoom-menu-host { position: relative; }
-.zoom-trigger { width: auto !important; min-width: 70px; padding: 0 6px; display: flex !important; grid-template-columns: none !important; gap: 4px; }
-.zoom-menu { position: absolute; z-index: 15; top: 35px; right: 0; width: 196px; padding: 7px; border: 1px solid #52625a; border-radius: 7px; background: #1d2923; box-shadow: 0 16px 38px rgba(0,0,0,.3); }
+.zoom-trigger { width: auto !important; min-width: 72px; padding: 0 5px !important; display: flex !important; flex: 0 0 auto; grid-template-columns: none !important; gap: 4px; font-size: 13px; font-weight: 650; }
+.zoom-menu { position: absolute; z-index: 15; top: 35px; right: 0; width: 196px; padding: 7px; border: 1px solid #59687e; border-radius: 7px; background: #1e2836; box-shadow: 0 16px 38px rgba(0,0,0,.3); }
 .zoom-menu button { width: 100%; height: 32px; padding: 0 10px; display: flex; justify-content: flex-start; border-radius: 4px; font-size: 12px; text-align: left; }
 .zoom-menu button.active { color: #8ee0b8; background: rgba(97,208,157,.12); }
-.zoom-menu hr { height: 1px; margin: 5px 3px; border: 0; background: #435049; }
-.zoom-menu kbd { margin-left: auto; color: #9cad9f; font-family: inherit; }
+.zoom-menu hr { height: 1px; margin: 5px 3px; border: 0; background: #4b596d; }
+.zoom-menu kbd { margin-left: auto; color: #aab5c4; font-family: inherit; }
 .pdf-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; background: #cbd0cc; }
 .pdf-pages { min-width: max-content; min-height: 100%; display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 24px; }
 .pdf-page { flex: none; overflow: hidden; background: white; box-shadow: 0 4px 16px rgba(26,37,31,.25); }

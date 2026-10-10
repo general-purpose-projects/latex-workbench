@@ -9,7 +9,7 @@ La versión `0.1.0` es un MVP funcional. Incluye:
 - detección de documentos raíz mediante `\\documentclass`;
 - edición LaTeX con la gramática de CodeMirror basada en Overleaf;
 - LuaLaTeX, XeLaTeX, pdfLaTeX, Latexmk y Tectonic cuando estén instalados;
-- perfiles rápidos `Preview` y completos `Release`;
+- perfil `Preview` de una sola pasada para edición rápida y `Release` con Latexmk para resolver por completo referencias, bibliografía e índices;
 - caché BLAKE3 de compilaciones sin cambios;
 - paneles redimensionables y árbol de archivos plegable con scroll;
 - visor PDF propio de alta densidad con navegación, zoom que conserva la página, ajuste al ancho y ajuste al alto;

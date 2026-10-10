@@ -24,13 +24,10 @@ import {
   FolderGit2,
   Github,
   GitPullRequest,
-  ImagePlus,
   LoaderCircle,
   PanelBottom,
   Play,
   RefreshCw,
-  Save,
-  Settings,
   SquareTerminal,
   Upload,
   X,
@@ -206,6 +203,7 @@ export default function App() {
   const [content, setContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
   const [assetUrl, setAssetUrl] = useState<string | null>(null);
+  const [autosaving, setAutosaving] = useState(false);
   const [building, setBuilding] = useState(false);
   const [build, setBuild] = useState<BuildResult | null>(null);
   const [pdfVersion, setPdfVersion] = useState(0);
@@ -347,41 +345,6 @@ export default function App() {
     }
   }, [activeFile, content, project, showNotice]);
 
-  const insertImage = useCallback(async () => {
-    if (!project) return;
-    const selected = await open({
-      multiple: false,
-      title: "Insertar imagen sin recomprimir",
-      filters: [{ name: "Imágenes", extensions: IMAGE_EXTENSIONS }],
-    });
-    if (!selected || Array.isArray(selected)) return;
-    try {
-      const relativePath = await invoke<string>("import_project_image", {
-        projectRoot: project.root,
-        source: selected,
-      });
-      const refreshed = await invoke<Project>("discover_project", { root: project.root });
-      setProject(refreshed);
-      const view = editorViewRef.current;
-      if (view && activeFile && isEditable(activeFile)) {
-        const isSvg = relativePath.toLowerCase().endsWith(".svg");
-        const sourcePath = isSvg ? relativePath.replace(/\.svg$/i, "") : relativePath;
-        const command = isSvg
-          ? `\n\\begin{figure}[htbp]\n  \\centering\n  \\includesvg[width=\\textwidth,inkscapelatex=false]{${sourcePath}}\n  \\caption{}\n\\end{figure}\n`
-          : `\n\\begin{figure}[htbp]\n  \\centering\n  \\includegraphics[width=\\textwidth]{${sourcePath}}\n  \\caption{}\n\\end{figure}\n`;
-        const { from, to } = view.state.selection.main;
-        view.dispatch({ changes: { from, to, insert: command }, selection: { anchor: from + command.length } });
-        view.focus();
-        showNotice("Imagen copiada sin pérdida e insertada en el documento");
-      } else {
-        await loadFile(relativePath, refreshed);
-        showNotice("Imagen copiada sin pérdida al proyecto");
-      }
-    } catch (error) {
-      showNotice(String(error));
-    }
-  }, [activeFile, loadFile, project, showNotice]);
-
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
@@ -392,6 +355,30 @@ export default function App() {
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
   }, [saveCurrent]);
+
+  useEffect(() => {
+    if (!project || !activeFile || !isEditable(activeFile) || !dirty) return;
+    let cancelled = false;
+    const snapshot = content;
+    const timer = window.setTimeout(() => {
+      setAutosaving(true);
+      void invoke("write_project_file", {
+        projectRoot: project.root,
+        path: activeFile,
+        content: snapshot,
+      }).then(() => {
+        if (!cancelled) setSavedContent(snapshot);
+      }).catch((error) => {
+        if (!cancelled) showNotice(`No se pudo guardar automáticamente: ${String(error)}`);
+      }).finally(() => {
+        if (!cancelled) setAutosaving(false);
+      });
+    }, 550);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeFile, content, dirty, project, showNotice]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -647,7 +634,10 @@ export default function App() {
         }}
       >
         <aside className="sidebar">
-          <div className="sidebar-title"><span>ARCHIVOS</span><button onClick={chooseProject}><Folder size={14} /></button></div>
+          <div className="sidebar-title">
+            <span>ARCHIVOS</span>
+            <button onClick={chooseProject} title="Abrir proyecto"><Folder size={14} /> Abrir proyecto</button>
+          </div>
           <FileTree key={project.root} files={project.files} activeFile={activeFile} onOpen={loadFile} />
           <section className={`file-outline ${outlineOpen ? "open" : "collapsed"}`}>
             <button
@@ -694,7 +684,6 @@ export default function App() {
           <div className="pane-header">
             <nav className="breadcrumbs" aria-label="Ruta del archivo">
               <Folder size={14} />
-              <span>{project.name}</span>
               {activeFile?.split("/").map((part, index, parts) => (
                 <span className={index === parts.length - 1 ? "current" : ""} key={`${part}-${index}`}>
                   <ChevronRight size={12} /> {part}
@@ -702,12 +691,6 @@ export default function App() {
               ))}
               {dirty && <b className="dirty-dot">●</b>}
             </nav>
-            <div className="pane-header-actions">
-              {activeFile && isEditable(activeFile) && (
-                <button onClick={insertImage} title="Insertar imagen sin pérdida"><ImagePlus size={14} /> Imagen</button>
-              )}
-              <small>{engine} · {profile}</small>
-            </div>
           </div>
           {activeFile && assetUrl ? (
             <div className="asset-preview">
@@ -851,15 +834,12 @@ export default function App() {
       </section>
 
       <footer className="statusbar">
-        <span>{dirty ? "Cambios sin guardar" : "Guardado"}</span>
+        <span>{autosaving ? "Guardando…" : dirty ? "Pendiente de autoguardado" : "Guardado automáticamente"}</span>
         <span className="spacer" />
-        <button onClick={saveCurrent} disabled={!activeFile || !isEditable(activeFile)}><Save size={14} /> Guardar</button>
         <button onClick={openTerminal}><SquareTerminal size={14} /> Terminal</button>
-        <button onClick={chooseProject}><Folder size={14} /> Abrir proyecto</button>
         <button onClick={() => setBottomOpen((value) => !value)}><PanelBottom size={14} /> Panel</button>
         <span>{project.files.filter((item) => item.kind === "file").length} archivos</span>
         <span><Box size={13} /> {availableEngines.length} motores</span>
-        <button><Settings size={14} /></button>
       </footer>
 
       {notice && <div className="toast"><Check size={16} /> {notice}</div>}

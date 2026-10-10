@@ -1,5 +1,17 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Folder, FolderOpen } from "lucide-react";
+import {
+  BookOpen,
+  ChevronDown,
+  ChevronRight,
+  FileCode2,
+  FileImage,
+  FileSpreadsheet,
+  FileText,
+  FileType2,
+  Folder,
+  FolderOpen,
+  Settings2,
+} from "lucide-react";
 
 export type ProjectFile = {
   path: string;
@@ -19,26 +31,27 @@ function ancestors(path: string) {
   return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"));
 }
 
-function fileType(name: string) {
+function FileIcon({ name }: { name: string }) {
   const extension = name.split(".").pop()?.toLowerCase() ?? "";
-  const types: Record<string, { label: string; tone: string }> = {
-    tex: { label: "TeX", tone: "tex" },
-    bib: { label: "BIB", tone: "bib" },
-    cls: { label: "CLS", tone: "style" },
-    sty: { label: "STY", tone: "style" },
-    bst: { label: "BST", tone: "style" },
-    pdf: { label: "PDF", tone: "pdf" },
-    png: { label: "PNG", tone: "image" },
-    jpg: { label: "JPG", tone: "image" },
-    jpeg: { label: "JPG", tone: "image" },
-    gif: { label: "GIF", tone: "image" },
-    webp: { label: "WEBP", tone: "image" },
-    svg: { label: "SVG", tone: "image" },
-    md: { label: "MD", tone: "text" },
-    txt: { label: "TXT", tone: "text" },
-    toml: { label: "CFG", tone: "config" },
-  };
-  return types[extension] ?? { label: extension.slice(0, 4).toUpperCase() || "FILE", tone: "other" };
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(extension)) {
+    return <FileImage className="tree-file-icon image" size={16} aria-label="Imagen" />;
+  }
+  if (["csv", "xls", "xlsx"].includes(extension)) {
+    return <FileSpreadsheet className="tree-file-icon table" size={16} aria-label="Hoja de cálculo" />;
+  }
+  if (extension === "bib") {
+    return <BookOpen className="tree-file-icon bibliography" size={16} aria-label="Bibliografía" />;
+  }
+  if (extension === "pdf") {
+    return <FileType2 className="tree-file-icon pdf" size={16} aria-label="PDF" />;
+  }
+  if (["cls", "sty", "bst", "py", "r", "js", "ts"].includes(extension)) {
+    return <FileCode2 className="tree-file-icon code" size={16} aria-label="Código" />;
+  }
+  if (["toml", "yaml", "yml", "json", "ini"].includes(extension)) {
+    return <Settings2 className="tree-file-icon config" size={16} aria-label="Configuración" />;
+  }
+  return <FileText className={`tree-file-icon ${extension === "tex" ? "tex" : "text"}`} size={16} aria-label="Documento" />;
 }
 
 export default function FileTree({ files, activeFile, onOpen }: Props) {
@@ -62,7 +75,6 @@ export default function FileTree({ files, activeFile, onOpen }: Props) {
       {visibleFiles.map((item) => {
         const isFolder = item.kind === "directory";
         const isExpanded = expanded.has(item.path);
-        const type = fileType(item.name);
         return (
           <button
             key={item.path}
@@ -78,7 +90,7 @@ export default function FileTree({ files, activeFile, onOpen }: Props) {
             </span>
             {isFolder
               ? (isExpanded ? <FolderOpen size={14} /> : <Folder size={14} />)
-              : <span className={`file-type-badge ${type.tone}`}>{type.label}</span>}
+              : <FileIcon name={item.name} />}
             <span>{item.name}</span>
           </button>
         );

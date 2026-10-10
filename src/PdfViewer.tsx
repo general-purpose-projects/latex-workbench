@@ -46,7 +46,9 @@ function PdfPage({ document, pageNumber, scale, scrollRoot }: PageProps) {
   useEffect(() => {
     if (!page || !viewport || !nearViewport || !canvasRef.current) return;
     const canvas = canvasRef.current;
-    const ratio = Math.max(1, window.devicePixelRatio || 1);
+    // Render above CSS resolution even on non-Retina displays. PDF pages are
+    // vector data, so supersampling keeps glyphs and diagrams crisp at zoom.
+    const ratio = Math.min(3, Math.max(2, window.devicePixelRatio || 1));
     canvas.width = Math.floor(viewport.width * ratio);
     canvas.height = Math.floor(viewport.height * ratio);
     canvas.style.width = `${viewport.width}px`;

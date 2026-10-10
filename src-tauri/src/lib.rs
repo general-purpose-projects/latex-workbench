@@ -515,6 +515,25 @@ fn build_command(
         return Ok((engine_path, args));
     }
 
+    // Preview is intentionally a single engine pass. It reuses the auxiliary
+    // files left in the preview directory, avoiding latexmk's reference and
+    // bibliography convergence loop on every text edit. Release keeps the
+    // complete latexmk pipeline below for final, fully converged output.
+    if request.profile == "preview" {
+        let mut args = vec![
+            "-interaction=nonstopmode".into(),
+            "-file-line-error".into(),
+            "-synctex=1".into(),
+            "-recorder".into(),
+            format!("-output-directory={output}"),
+        ];
+        if request.shell_escape {
+            args.push("-shell-escape".into());
+        }
+        args.push(document);
+        return Ok((engine_path, args));
+    }
+
     if let Some(latexmk) = find_executable("latexmk") {
         let mode = match request.engine.as_str() {
             "lualatex" => "-lualatex",
@@ -1093,6 +1112,32 @@ mod tests {
     #[test]
     fn executable_lookup_finds_installed_tex() {
         assert!(find_executable("latexmk").is_some());
+    }
+
+    #[test]
+    fn preview_uses_one_engine_pass_while_release_uses_latexmk() {
+        if find_executable("lualatex").is_none() || find_executable("latexmk").is_none() {
+            return;
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("tests/fixtures/basic");
+        let document = root.join("main.tex");
+        let output = root.join(BUILD_DIR).join("preview");
+        let mut request = BuildRequest {
+            project_root: root.to_string_lossy().into_owned(),
+            document: "main.tex".into(),
+            engine: "lualatex".into(),
+            profile: "preview".into(),
+            shell_escape: false,
+        };
+        let (preview_program, _) = build_command(&request, &output, &document).expect("preview");
+        assert_eq!(preview_program.file_name().and_then(|name| name.to_str()), Some("lualatex"));
+
+        request.profile = "release".into();
+        let (release_program, _) = build_command(&request, &output, &document).expect("release");
+        assert_eq!(release_program.file_name().and_then(|name| name.to_str()), Some("latexmk"));
     }
 
     #[tokio::test]
