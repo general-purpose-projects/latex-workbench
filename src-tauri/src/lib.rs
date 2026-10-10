@@ -24,6 +24,7 @@ use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 const BUILD_DIR: &str = ".latex-workbench";
 const MAX_PROJECT_FILES: usize = 10_000;
+const BUILD_PIPELINE_VERSION: &[u8] = b"2-references-and-bibliography";
 
 struct TerminalSession {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -423,6 +424,7 @@ fn project_fingerprint(
     let mut paths = dependency_paths(root, dependency_file);
     paths.sort();
     let mut hasher = Hasher::new();
+    hasher.update(BUILD_PIPELINE_VERSION);
     hasher.update(request.document.as_bytes());
     hasher.update(request.engine.as_bytes());
     hasher.update(request.profile.as_bytes());
@@ -523,25 +525,10 @@ fn build_command(
         return Ok((engine_path, args));
     }
 
-    // Preview is intentionally a single engine pass. It reuses the auxiliary
-    // files left in the preview directory, avoiding latexmk's reference and
-    // bibliography convergence loop on every text edit. Release keeps the
-    // complete latexmk pipeline below for final, fully converged output.
-    if request.profile == "preview" {
-        let mut args = vec![
-            "-interaction=nonstopmode".into(),
-            "-file-line-error".into(),
-            "-synctex=1".into(),
-            "-recorder".into(),
-            format!("-output-directory={output}"),
-        ];
-        if request.shell_escape {
-            args.push("-shell-escape".into());
-        }
-        args.push(document);
-        return Ok((engine_path, args));
-    }
-
+    // Latexmk reuses the auxiliary files in each profile and only runs the
+    // passes that are needed.  Keeping it in Preview is essential: references
+    // need another TeX pass, while biblatex and traditional bibliographies
+    // additionally need Biber or BibTeX before the final converging pass.
     if let Some(latexmk) = find_executable("latexmk") {
         let mode = match request.engine.as_str() {
             "lualatex" => "-lualatex",
@@ -1245,7 +1232,7 @@ mod tests {
             project_root: root.to_string_lossy().into_owned(),
             document: "main.tex".into(),
             engine: "lualatex".into(),
-            profile: "preview".into(),
+            profile: "release".into(),
             shell_escape: false,
         };
         let result = compile_project_inner(None, request)
@@ -1270,7 +1257,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_uses_one_engine_pass_while_release_uses_latexmk() {
+    fn preview_and_release_use_incremental_latexmk() {
         if find_executable("lualatex").is_none() || find_executable("latexmk").is_none() {
             return;
         }
@@ -1288,7 +1275,7 @@ mod tests {
             shell_escape: false,
         };
         let (preview_program, _) = build_command(&request, &output, &document).expect("preview");
-        assert_eq!(preview_program.file_name().and_then(|name| name.to_str()), Some("lualatex"));
+        assert_eq!(preview_program.file_name().and_then(|name| name.to_str()), Some("latexmk"));
 
         request.profile = "release".into();
         let (release_program, _) = build_command(&request, &output, &document).expect("release");
@@ -1332,6 +1319,52 @@ mod tests {
             .await
             .expect("minted preview build");
         assert!(result.success, "{}", result.log);
+    }
+
+    #[tokio::test]
+    async fn preview_resolves_autoref_and_apa_bibliography() {
+        if find_executable("lualatex").is_none()
+            || find_executable("latexmk").is_none()
+            || find_executable("biber").is_none()
+        {
+            return;
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("tests/fixtures/references");
+        let request = BuildRequest {
+            project_root: root.to_string_lossy().into_owned(),
+            document: "main.tex".into(),
+            engine: "lualatex".into(),
+            profile: "preview".into(),
+            shell_escape: false,
+        };
+        clear_build_cache(request.project_root.clone(), request.profile.clone())
+            .expect("clear references fixture cache");
+        let result = compile_project_inner(None, request)
+            .await
+            .expect("references preview build");
+        assert!(result.success, "{}", result.log);
+
+        let output = root.join(BUILD_DIR).join("preview");
+        let bbl = fs::read_to_string(output.join("main.bbl")).expect("Biber output");
+        assert!(bbl.contains("Gamma"));
+        let aux = fs::read_to_string(output.join("main.aux")).expect("LaTeX aux output");
+        assert!(aux.contains("newlabel{sec:patterns}"));
+
+        if let Some(pdftotext) = find_executable("pdftotext") {
+            let text = std::process::Command::new(pdftotext)
+                .arg(result.pdf_path.expect("compiled references pdf"))
+                .arg("-")
+                .output()
+                .expect("extract references PDF text");
+            assert!(text.status.success());
+            let text = String::from_utf8_lossy(&text.stdout);
+            assert!(!text.contains("??"), "{text}");
+            assert!(text.contains("Gamma"), "{text}");
+            assert!(text.contains("section 1"), "{text}");
+        }
     }
 
     #[tokio::test]

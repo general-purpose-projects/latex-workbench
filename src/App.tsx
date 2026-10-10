@@ -661,7 +661,7 @@ export default function App() {
             <div className="dropdown-menu compile-menu">
               <span className="menu-heading">Modo de compilación</span>
               <button className={`mode-option ${profile === "preview" ? "selected" : ""}`} onClick={() => setProfile("preview")}>
-                <Check size={14} /> Vista previa rápida
+                <Check size={14} /> Vista previa incremental
               </button>
               <button className={`mode-option ${profile === "release" ? "selected" : ""}`} onClick={() => setProfile("release")}>
                 <Check size={14} /> Calidad final
