@@ -13,13 +13,14 @@ type PageProps = {
   document: PDFDocumentProxy;
   pageNumber: number;
   scale: number;
+  scrollRoot: HTMLElement | null;
 };
 
-function PdfPage({ document, pageNumber, scale }: PageProps) {
+function PdfPage({ document, pageNumber, scale, scrollRoot }: PageProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [page, setPage] = useState<PDFPageProxy | null>(null);
-  const [nearViewport, setNearViewport] = useState(false);
+  const [nearViewport, setNearViewport] = useState(pageNumber === 1);
 
   useEffect(() => {
     let active = true;
@@ -31,12 +32,14 @@ function PdfPage({ document, pageNumber, scale }: PageProps) {
     const element = hostRef.current;
     if (!element) return;
     const observer = new IntersectionObserver(
-      ([entry]) => setNearViewport(entry.isIntersecting),
-      { rootMargin: "900px 0px" },
+      ([entry]) => {
+        if (entry) setNearViewport(entry.isIntersecting);
+      },
+      { root: scrollRoot, rootMargin: "900px 0px" },
     );
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+  }, [scrollRoot]);
 
   const viewport = useMemo(() => page?.getViewport({ scale }), [page, scale]);
 
@@ -81,6 +84,7 @@ type Props = {
 
 export default function PdfViewer({ projectRoot, path, version }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollRoot, setScrollRoot] = useState<HTMLDivElement | null>(null);
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState<ZoomMode>(100);
@@ -88,6 +92,11 @@ export default function PdfViewer({ projectRoot, path, version }: Props) {
   const [basePage, setBasePage] = useState({ width: 612, height: 792 });
   const [currentPage, setCurrentPage] = useState(1);
   const [zoomOpen, setZoomOpen] = useState(false);
+
+  const attachScrollRoot = useCallback((element: HTMLDivElement | null) => {
+    scrollRef.current = element;
+    setScrollRoot(element);
+  }, []);
 
   useEffect(() => {
     let task: ReturnType<typeof pdfjs.getDocument> | null = null;
@@ -217,11 +226,17 @@ export default function PdfViewer({ projectRoot, path, version }: Props) {
           )}
         </div>
       </div>
-      <div className="pdf-scroll" ref={scrollRef} onScroll={updateCurrentPage}>
+      <div className="pdf-scroll" ref={attachScrollRoot} onScroll={updateCurrentPage}>
         {!document ? <div className="pdf-loading">Cargando PDF…</div> : (
           <div className="pdf-pages">
             {Array.from({ length: document.numPages }, (_, index) => (
-              <PdfPage key={index + 1} document={document} pageNumber={index + 1} scale={scale} />
+              <PdfPage
+                key={index + 1}
+                document={document}
+                pageNumber={index + 1}
+                scale={scale}
+                scrollRoot={scrollRoot}
+              />
             ))}
           </div>
         )}
