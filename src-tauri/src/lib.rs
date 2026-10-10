@@ -3,7 +3,7 @@ use ignore::{DirEntry, WalkBuilder};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -176,6 +176,32 @@ fn project_path(root: &Path, relative: &str) -> Result<PathBuf, AppError> {
     Ok(canonical)
 }
 
+fn project_directory(root: &Path, relative: &str) -> Result<PathBuf, AppError> {
+    if relative.is_empty() {
+        return Ok(root.to_path_buf());
+    }
+    let candidate = fs::canonicalize(root.join(relative))?;
+    if !candidate.starts_with(root) || !candidate.is_dir() {
+        return Err(AppError::InvalidPath(relative.to_string()));
+    }
+    Ok(candidate)
+}
+
+fn safe_entry_name(name: &str) -> Result<&str, AppError> {
+    let path = Path::new(name);
+    if name.trim().is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+        || path.file_name().and_then(|value| value.to_str()) != Some(name)
+    {
+        return Err(AppError::InvalidPath(name.to_string()));
+    }
+    Ok(name)
+}
+
 fn executable_candidates(name: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(path) = std::env::var_os("PATH") {
@@ -198,10 +224,7 @@ fn find_executable(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-fn project_build_dir(
-    root: &Path,
-    app: Option<&tauri::AppHandle>,
-) -> Result<PathBuf, AppError> {
+fn project_build_dir(root: &Path, app: Option<&tauri::AppHandle>) -> Result<PathBuf, AppError> {
     if let Some(app) = app {
         let mut hasher = Hasher::new();
         hasher.update(root.to_string_lossy().as_bytes());
@@ -371,7 +394,9 @@ fn import_project_image(project_root: String, source: String) -> Result<String, 
         .unwrap_or_default()
         .to_ascii_lowercase();
     if !["png", "jpg", "jpeg", "gif", "webp", "svg"].contains(&extension.as_str()) {
-        return Err(AppError::Message("El formato de imagen no es compatible".into()));
+        return Err(AppError::Message(
+            "El formato de imagen no es compatible".into(),
+        ));
     }
 
     let images = root.join("images");
@@ -417,6 +442,178 @@ fn write_project_file(project_root: String, path: String, content: String) -> Re
     let root = canonical_root(&project_root)?;
     let path = project_path(&root, &path)?;
     fs::write(path, content).map_err(AppError::from)
+}
+
+#[tauri::command]
+fn create_project_entry(
+    project_root: String,
+    directory: String,
+    name: String,
+    kind: String,
+) -> Result<String, AppError> {
+    let root = canonical_root(&project_root)?;
+    let parent = project_directory(&root, &directory)?;
+    let name = safe_entry_name(name.trim())?;
+    let destination = parent.join(name);
+    if destination.exists() {
+        return Err(AppError::Message(format!("Ya existe “{name}”")));
+    }
+    match kind.as_str() {
+        "file" => {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&destination)?;
+        }
+        "directory" => fs::create_dir(&destination)?,
+        _ => return Err(AppError::Message("Tipo de elemento inválido".into())),
+    }
+    destination
+        .strip_prefix(&root)
+        .map(|value| value.to_string_lossy().replace('\\', "/"))
+        .map_err(|_| AppError::InvalidPath(destination.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn rename_project_entry(
+    project_root: String,
+    path: String,
+    new_name: String,
+) -> Result<String, AppError> {
+    let root = canonical_root(&project_root)?;
+    let source = fs::canonicalize(root.join(&path))?;
+    if !source.starts_with(&root) || source == root {
+        return Err(AppError::InvalidPath(path));
+    }
+    let name = safe_entry_name(new_name.trim())?;
+    let destination = source
+        .parent()
+        .ok_or_else(|| AppError::InvalidPath(path.clone()))?
+        .join(name);
+    if destination.exists() {
+        return Err(AppError::Message(format!("Ya existe “{name}”")));
+    }
+    fs::rename(&source, &destination)?;
+    destination
+        .strip_prefix(&root)
+        .map(|value| value.to_string_lossy().replace('\\', "/"))
+        .map_err(|_| AppError::InvalidPath(destination.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn remove_project_entry(project_root: String, path: String) -> Result<(), AppError> {
+    let root = canonical_root(&project_root)?;
+    let target = fs::canonicalize(root.join(&path))?;
+    if !target.starts_with(&root) || target == root {
+        return Err(AppError::InvalidPath(path));
+    }
+    if target.is_dir() {
+        fs::remove_dir_all(target)?;
+    } else {
+        fs::remove_file(target)?;
+    }
+    Ok(())
+}
+
+fn import_destination(root: &Path, directory: &str, source: &Path) -> Result<PathBuf, AppError> {
+    let parent = project_directory(root, directory)?;
+    let name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| AppError::InvalidPath(source.to_string_lossy().into_owned()))?;
+    safe_entry_name(name)?;
+    Ok(parent.join(name))
+}
+
+#[tauri::command]
+fn project_import_conflicts(
+    project_root: String,
+    sources: Vec<String>,
+    directory: String,
+) -> Result<Vec<String>, AppError> {
+    let root = canonical_root(&project_root)?;
+    let mut conflicts = Vec::new();
+    let mut destinations = HashSet::new();
+    for source in sources {
+        let source = fs::canonicalize(&source)?;
+        if !source.is_file() {
+            return Err(AppError::Message(format!(
+                "Solo se pueden importar archivos: {}",
+                source.display()
+            )));
+        }
+        let destination = import_destination(&root, &directory, &source)?;
+        let repeated_destination = !destinations.insert(destination.clone());
+        if repeated_destination
+            || (destination.exists()
+                && fs::canonicalize(&destination).ok().as_ref() != Some(&source))
+        {
+            conflicts.push(
+                destination
+                    .strip_prefix(&root)
+                    .unwrap_or(&destination)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
+    Ok(conflicts)
+}
+
+#[tauri::command]
+fn import_project_files(
+    project_root: String,
+    sources: Vec<String>,
+    directory: String,
+    overwrite: bool,
+) -> Result<Vec<String>, AppError> {
+    let root = canonical_root(&project_root)?;
+    let mut imported = Vec::new();
+    for source in sources {
+        let source = fs::canonicalize(&source)?;
+        if !source.is_file() {
+            return Err(AppError::Message(format!(
+                "Solo se pueden importar archivos: {}",
+                source.display()
+            )));
+        }
+        let destination = import_destination(&root, &directory, &source)?;
+        if destination.exists() {
+            if fs::canonicalize(&destination).ok().as_ref() == Some(&source) {
+                continue;
+            }
+            if !overwrite {
+                return Err(AppError::Message(format!(
+                    "Ya existe “{}”",
+                    destination
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                )));
+            }
+        }
+        fs::copy(&source, &destination)?;
+        imported.push(
+            destination
+                .strip_prefix(&root)
+                .map_err(|_| AppError::InvalidPath(destination.to_string_lossy().into_owned()))?
+                .to_string_lossy()
+                .replace('\\', "/"),
+        );
+    }
+    Ok(imported)
+}
+
+#[tauri::command]
+fn export_project_file(
+    project_root: String,
+    path: String,
+    destination: String,
+) -> Result<(), AppError> {
+    let root = canonical_root(&project_root)?;
+    let source = project_path(&root, &path)?;
+    fs::copy(source, destination)?;
+    Ok(())
 }
 
 fn dependency_paths(root: &Path, dependency_file: &Path) -> Vec<PathBuf> {
@@ -527,9 +724,8 @@ fn build_command(
         .to_string_lossy()
         .replace('\\', "/")
         + "/";
-    let svg_pretex = format!(
-        "-usepretex=\\PassOptionsToPackage{{inkscapepath={{{svg_output}}}}}{{svg}}"
-    );
+    let svg_pretex =
+        format!("-usepretex=\\PassOptionsToPackage{{inkscapepath={{{svg_output}}}}}{{svg}}");
 
     if request.engine == "tectonic" {
         return Ok((
@@ -978,8 +1174,8 @@ async fn inverse_search_inner(
     {
         return Err(AppError::InvalidPath(pdf.to_string_lossy().into_owned()));
     }
-    let synctex = find_executable("synctex")
-        .ok_or_else(|| AppError::EngineUnavailable("synctex".into()))?;
+    let synctex =
+        find_executable("synctex").ok_or_else(|| AppError::EngineUnavailable("synctex".into()))?;
     let query = format!("{page}:{x:.3}:{y:.3}:{}", pdf.display());
     let output = Command::new(synctex)
         .args(["edit", "-o", &query])
@@ -1233,6 +1429,12 @@ pub fn run() {
             import_project_image,
             default_download_path,
             write_project_file,
+            create_project_entry,
+            rename_project_entry,
+            remove_project_entry,
+            project_import_conflicts,
+            import_project_files,
+            export_project_file,
             clear_build_cache,
             compile_project,
             read_build_pdf,
@@ -1252,6 +1454,21 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_entry_names_cannot_escape_their_directory() {
+        assert_eq!(safe_entry_name("capitulo.tex").unwrap(), "capitulo.tex");
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "../secreto.tex",
+            "carpeta/archivo.tex",
+            "carpeta\\archivo.tex",
+        ] {
+            assert!(safe_entry_name(invalid).is_err(), "accepted {invalid:?}");
+        }
+    }
 
     #[test]
     fn diagnostics_separate_errors_and_warnings() {
@@ -1327,7 +1544,10 @@ mod tests {
             shell_escape: false,
         };
         let (program, _) = build_command(&request, &output, &document).expect("build");
-        assert_eq!(program.file_name().and_then(|name| name.to_str()), Some("latexmk"));
+        assert_eq!(
+            program.file_name().and_then(|name| name.to_str()),
+            Some("latexmk")
+        );
     }
 
     #[test]
@@ -1440,7 +1660,12 @@ mod tests {
         assert!(!root.join("svg-inkscape").exists());
         let generated = root.join(BUILD_DIR).join("build").join("svg-inkscape");
         assert!(generated.is_dir());
-        assert!(fs::read_dir(generated).expect("SVG artifacts").next().is_some());
+        assert!(
+            fs::read_dir(generated)
+                .expect("SVG artifacts")
+                .next()
+                .is_some()
+        );
     }
 
     #[tokio::test]

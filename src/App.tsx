@@ -34,7 +34,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import FileTree, { type ProjectFile } from "./FileTree";
+import FileTree, { type ProjectFile, type TreeAction } from "./FileTree";
 import PdfViewer, { type SourceLocation } from "./PdfViewer";
 import TerminalPanel from "./TerminalPanel";
 
@@ -86,6 +86,16 @@ function initialEditorZoom() {
 
 function basename(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
+}
+
+function movedPath(path: string | null, previous: string, next: string) {
+  if (!path) return path;
+  if (path === previous) return next;
+  return path.startsWith(`${previous}/`) ? `${next}${path.slice(previous.length)}` : path;
+}
+
+function pathIsInside(path: string | null, entry: string) {
+  return path === entry || Boolean(path?.startsWith(`${entry}/`));
 }
 
 function isEditable(path: string) {
@@ -367,6 +377,134 @@ export default function App() {
       return false;
     }
   }, [activeFile, content, project, showNotice]);
+
+  const rediscoverProject = useCallback(async () => {
+    if (!project) return null;
+    const info = await invoke<Project>("discover_project", { root: project.root });
+    setProject(info);
+    return info;
+  }, [project]);
+
+  const importFiles = useCallback(async (sources: string[], directory: string) => {
+    if (!project || sources.length === 0) return;
+    let replacingDirtyActive = false;
+    try {
+      const conflicts = await invoke<string[]>("project_import_conflicts", {
+        projectRoot: project.root,
+        sources,
+        directory,
+      });
+      let overwrite = false;
+      if (conflicts.length > 0) {
+        const preview = conflicts.slice(0, 6).map((path) => `• ${path}`).join("\n");
+        const remainder = conflicts.length > 6 ? `\n…y ${conflicts.length - 6} más` : "";
+        overwrite = window.confirm(
+          `Ya ${conflicts.length === 1 ? "existe este archivo" : "existen estos archivos"}:\n\n${preview}${remainder}\n\n¿Deseas reemplazar ${conflicts.length === 1 ? "el archivo" : "los archivos"}?`,
+        );
+        if (!overwrite) return;
+      }
+      replacingDirtyActive = Boolean(activeFile && dirty && conflicts.includes(activeFile));
+      if (replacingDirtyActive) setSavedContent(content);
+      const imported = await invoke<string[]>("import_project_files", {
+        projectRoot: project.root,
+        sources,
+        directory,
+        overwrite,
+      });
+      const info = await rediscoverProject();
+      setBuild(null);
+      if (info && activeFile && imported.includes(activeFile)) await loadFile(activeFile, info, true);
+      showNotice(imported.length === 1 ? `Archivo importado: ${imported[0]}` : `${imported.length} archivos importados`);
+    } catch (error) {
+      if (replacingDirtyActive) setSavedContent(savedContent);
+      showNotice(`No se pudieron importar los archivos: ${String(error)}`);
+    }
+  }, [activeFile, content, dirty, loadFile, project, rediscoverProject, savedContent, showNotice]);
+
+  const handleTreeAction = useCallback(async (action: TreeAction, item: ProjectFile | null, directory: string) => {
+    if (!project) return;
+    try {
+      if (action === "open" && item?.kind === "file") {
+        await loadFile(item.path);
+        return;
+      }
+      if (action === "upload") {
+        const selected = await open({ multiple: true, directory: false, title: "Importar archivos al proyecto" });
+        if (!selected) return;
+        await importFiles(Array.isArray(selected) ? selected : [selected], directory);
+        return;
+      }
+      if (action === "new-file" || action === "new-folder") {
+        const kind = action === "new-file" ? "file" : "directory";
+        if (kind === "file" && dirty && !(await saveCurrent())) return;
+        const name = window.prompt(action === "new-file" ? "Nombre del nuevo archivo" : "Nombre de la nueva carpeta", action === "new-file" ? "nuevo.tex" : "nueva-carpeta");
+        if (!name?.trim()) return;
+        const created = await invoke<string>("create_project_entry", {
+          projectRoot: project.root,
+          directory,
+          name: name.trim(),
+          kind,
+        });
+        const info = await rediscoverProject();
+        if (kind === "file" && info && (isEditable(created) || isImage(created))) await loadFile(created, info, true);
+        showNotice(`${kind === "file" ? "Archivo" : "Carpeta"} creado`);
+        return;
+      }
+      if (!item) return;
+      if (action === "set-main") {
+        setDocumentRoot(item.path);
+        setBuild(null);
+        showNotice(`Documento principal: ${item.path}`);
+        return;
+      }
+      if (action === "download" && item.kind === "file") {
+        if (activeFile === item.path && dirty && !(await saveCurrent())) return;
+        const defaultPath = await invoke<string>("default_download_path", { fileName: item.name });
+        const destination = await save({ title: `Descargar ${item.name}`, defaultPath });
+        if (!destination) return;
+        await invoke("export_project_file", { projectRoot: project.root, path: item.path, destination });
+        showNotice("Archivo descargado correctamente");
+        return;
+      }
+      if (action === "rename") {
+        if (pathIsInside(activeFile, item.path) && dirty && !(await saveCurrent())) return;
+        const name = window.prompt("Nuevo nombre", item.name);
+        if (!name?.trim() || name.trim() === item.name) return;
+        const renamed = await invoke<string>("rename_project_entry", {
+          projectRoot: project.root,
+          path: item.path,
+          newName: name.trim(),
+        });
+        const nextActive = movedPath(activeFile, item.path, renamed);
+        const nextDocument = movedPath(documentRoot, item.path, renamed) ?? "";
+        const info = await rediscoverProject();
+        setDocumentRoot(nextDocument);
+        setBuild(null);
+        if (info && nextActive && pathIsInside(nextActive, renamed)) await loadFile(nextActive, info, true);
+        showNotice("Elemento renombrado");
+        return;
+      }
+      if (action === "delete") {
+        const description = item.kind === "directory" ? `la carpeta “${item.name}” y todo su contenido` : `el archivo “${item.name}”`;
+        if (!window.confirm(`¿Deseas eliminar ${description}? Esta acción no se puede deshacer.`)) return;
+        await invoke("remove_project_entry", { projectRoot: project.root, path: item.path });
+        const removedActive = pathIsInside(activeFile, item.path);
+        const removedDocument = pathIsInside(documentRoot, item.path);
+        const info = await rediscoverProject();
+        if (removedActive) {
+          setActiveFile(null);
+          setContent("");
+          setSavedContent("");
+          setAssetUrl(null);
+        }
+        if (removedDocument) setDocumentRoot(info?.documents[0] ?? "");
+        setBuild(null);
+        showNotice("Elemento eliminado");
+      }
+    } catch (error) {
+      showNotice(String(error));
+    }
+  }, [activeFile, dirty, documentRoot, importFiles, loadFile, project, rediscoverProject, saveCurrent, showNotice]);
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
@@ -698,7 +836,15 @@ export default function App() {
             <span>ARCHIVOS</span>
             <button onClick={chooseProject} title="Abrir proyecto"><Folder size={14} /> Abrir proyecto</button>
           </div>
-          <FileTree key={project.root} files={project.files} activeFile={activeFile} onOpen={loadFile} />
+          <FileTree
+            key={project.root}
+            files={project.files}
+            activeFile={activeFile}
+            documentRoot={documentRoot}
+            onOpen={loadFile}
+            onAction={handleTreeAction}
+            onImportFiles={importFiles}
+          />
           <section className={`file-outline ${outlineOpen ? "open" : "collapsed"}`}>
             <button
               className="outline-title"

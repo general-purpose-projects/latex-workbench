@@ -101,6 +101,8 @@ body.resize-bottom { cursor: row-resize; }
 .file-row { border: 0; background: transparent; width: 100%; min-height: 27px; display: flex; align-items: center; gap: 6px; color: #d5dbe2; font-size: 12px; text-align: left; padding-right: 8px; }
 .file-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-row:hover { background: #2a3441; }.file-row.active { color: white; background: #34445b; font-weight: 650; }
+.file-tree.drag-root { box-shadow: inset 0 0 0 2px #62a879; background: #202d29; }
+.file-row.drag-target { color: white; background: #2f6e4b; box-shadow: inset 0 0 0 1px #70b589; }
 .tree-chevron { width: 13px; min-width: 13px; display: grid; place-items: center; color: #9ea9b6; }
 .tree-file-icon { width: 16px; min-width: 16px; stroke-width: 1.8; color: #b9c4d1; }
 .tree-file-icon.tex { color: #5eb5e6; }.tree-file-icon.bibliography { color: #d6a64b; }
@@ -108,6 +110,13 @@ body.resize-bottom { cursor: row-resize; }
 .tree-file-icon.code { color: #75b8c8; }.tree-file-icon.table { color: #63b487; }
 .tree-file-icon.config { color: #aeb8c4; }.tree-file-icon.text { color: #b9c4d1; }
 .file-row.active .tree-file-icon { color: white; }
+.tree-context-menu { position: fixed; z-index: 100; width: 235px; padding: 6px; display: flex; flex-direction: column; border: 1px solid #536074; border-radius: 6px; background: #1c2530; box-shadow: 0 12px 30px rgb(0 0 0 / 38%); }
+.tree-context-menu button { width: 100%; min-height: 34px; padding: 0 10px; display: flex; align-items: center; gap: 10px; border: 0; border-radius: 4px; color: #edf1f5; background: transparent; font-size: 12px; text-align: left; }
+.tree-context-menu button:hover:not(:disabled) { background: #344155; }
+.tree-context-menu button:disabled { color: #7d8998; cursor: default; }
+.tree-context-menu button.danger { color: #ffaaaa; }
+.tree-context-menu button.danger:hover { color: white; background: #a33e43; }
+.context-separator { height: 1px; margin: 5px 3px; background: #465265; }
 .file-tree::-webkit-scrollbar, .outline-tree::-webkit-scrollbar { width: 10px; background: #1b222c; }
 .file-tree::-webkit-scrollbar-thumb, .outline-tree::-webkit-scrollbar-thumb { border: 2px solid #1b222c; border-radius: 7px; background: #69758a; }
 .file-outline { max-height: 42%; min-height: 35px; flex: 0 1 230px; display: flex; flex-direction: column; border-top: 4px solid #59657a; background: #1b222c; }
