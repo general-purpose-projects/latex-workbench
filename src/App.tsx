@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { latex } from "codemirror-lang-latex";
 import { invoke } from "@tauri-apps/api/core";
@@ -90,6 +90,7 @@ export default function App() {
   const [bottomHeight, setBottomHeight] = useState(220);
   const [bottomTab, setBottomTab] = useState<"build" | "terminal">("build");
   const [terminalStarted, setTerminalStarted] = useState(false);
+  const logScrollRef = useRef<HTMLDivElement>(null);
 
   const dirty = content !== savedContent;
   const availableEngines = engines.filter((item) => item.available);
@@ -168,6 +169,11 @@ export default function App() {
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
   }, [saveCurrent]);
+
+  useEffect(() => {
+    if (!build?.log || !logScrollRef.current) return;
+    logScrollRef.current.scrollTo({ top: 0, left: 0 });
+  }, [build?.log]);
 
   const compile = useCallback(async () => {
     if (!project || !documentRoot || building) return;
@@ -454,7 +460,12 @@ export default function App() {
                 </div>
                 <button className="bottom-close" onClick={() => setBottomOpen(false)} title="Cerrar panel"><X size={15} /></button>
               </div>
-              <div className={`bottom-content ${bottomTab === "build" ? "" : "hidden"}`}>
+              <div
+                ref={logScrollRef}
+                className={`bottom-content ${bottomTab === "build" ? "" : "hidden"}`}
+                tabIndex={0}
+                aria-label="Registro de compilación"
+              >
                 {gitOutput && <pre className="git-output"><Github size={14} /> {gitOutput}</pre>}
                 {build?.diagnostics.map((item, index) => (
                   <div key={`${item.message}-${index}`} className={`diagnostic ${item.severity}`}>
