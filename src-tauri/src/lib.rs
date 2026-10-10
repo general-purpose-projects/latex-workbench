@@ -24,7 +24,7 @@ use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 const BUILD_DIR: &str = ".latex-workbench";
 const MAX_PROJECT_FILES: usize = 10_000;
-const BUILD_PIPELINE_VERSION: &[u8] = b"2-references-and-bibliography";
+const BUILD_PIPELINE_VERSION: &[u8] = b"3-external-cache-and-svg-artifacts";
 
 struct TerminalSession {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -196,6 +196,36 @@ fn find_executable(name: &str) -> Option<PathBuf> {
     executable_candidates(name)
         .into_iter()
         .find(|candidate| candidate.is_file())
+}
+
+fn project_build_dir(
+    root: &Path,
+    app: Option<&tauri::AppHandle>,
+) -> Result<PathBuf, AppError> {
+    if let Some(app) = app {
+        let mut hasher = Hasher::new();
+        hasher.update(root.to_string_lossy().as_bytes());
+        let project_key = hasher.finalize().to_hex().to_string();
+        return Ok(app
+            .path()
+            .app_cache_dir()
+            .map_err(|error| AppError::Message(error.to_string()))?
+            .join("projects")
+            .join(project_key)
+            .join("build"));
+    }
+    Ok(root.join(BUILD_DIR).join("build"))
+}
+
+fn remove_cache_path(path: &Path) -> Result<(), AppError> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || metadata.is_file() {
+            fs::remove_file(path)?;
+        } else {
+            fs::remove_dir_all(path)?;
+        }
+    }
+    Ok(())
 }
 
 async fn command_version(path: &Path) -> Option<String> {
@@ -492,6 +522,14 @@ fn build_command(
         .ok_or_else(|| AppError::EngineUnavailable(request.engine.clone()))?;
     let output = output_dir.to_string_lossy().into_owned();
     let document = document_path.to_string_lossy().into_owned();
+    let svg_output = output_dir
+        .join("svg-inkscape")
+        .to_string_lossy()
+        .replace('\\', "/")
+        + "/";
+    let svg_pretex = format!(
+        "-usepretex=\\PassOptionsToPackage{{inkscapepath={{{svg_output}}}}}{{svg}}"
+    );
 
     if request.engine == "tectonic" {
         return Ok((
@@ -515,6 +553,7 @@ fn build_command(
             "-synctex=1".into(),
             "-recorder".into(),
             format!("-outdir={output}"),
+            svg_pretex.clone(),
         ];
         if request.shell_escape {
             args.push("-shell-escape".into());
@@ -540,6 +579,7 @@ fn build_command(
             "-synctex=1".into(),
             "-recorder".into(),
             format!("-outdir={output}"),
+            svg_pretex,
         ];
         if request.shell_escape {
             args.push("-shell-escape".into());
@@ -787,8 +827,13 @@ async fn compile_project_inner(
     let started = Instant::now();
     let root = canonical_root(&request.project_root)?;
     let document_path = project_path(&root, &request.document)?;
-    let output_dir = root.join(BUILD_DIR).join("build");
+    let output_dir = project_build_dir(&root, app.as_ref())?;
+    if app.is_some() {
+        remove_cache_path(&root.join(BUILD_DIR))?;
+        remove_cache_path(&root.join("svg-inkscape"))?;
+    }
     fs::create_dir_all(&output_dir)?;
+    fs::create_dir_all(output_dir.join("svg-inkscape"))?;
     let pdf_name = document_path
         .file_stem()
         .and_then(|value| value.to_str())
@@ -850,19 +895,23 @@ async fn compile_project_inner(
     })
 }
 
-#[tauri::command]
-fn clear_build_cache(project_root: String) -> Result<(), AppError> {
+fn clear_build_cache_inner(
+    app: Option<&tauri::AppHandle>,
+    project_root: String,
+) -> Result<(), AppError> {
     let root = canonical_root(&project_root)?;
-    let cache = root.join(BUILD_DIR);
-    if let Ok(metadata) = fs::symlink_metadata(&cache) {
-        if metadata.file_type().is_symlink() || metadata.is_file() {
-            fs::remove_file(&cache)?;
-        } else {
-            fs::remove_dir_all(&cache)?;
-        }
+    let cache = project_build_dir(&root, app)?;
+    remove_cache_path(&cache)?;
+    if app.is_some() {
+        remove_cache_path(&root.join(BUILD_DIR))?;
     }
-    fs::create_dir_all(cache.join("build"))?;
+    fs::create_dir_all(cache.join("svg-inkscape"))?;
     Ok(())
+}
+
+#[tauri::command]
+fn clear_build_cache(app: tauri::AppHandle, project_root: String) -> Result<(), AppError> {
+    clear_build_cache_inner(Some(&app), project_root)
 }
 
 #[tauri::command]
@@ -876,9 +925,13 @@ fn export_pdf(source: String, destination: String) -> Result<(), AppError> {
 }
 
 #[tauri::command]
-fn read_build_pdf(project_root: String, path: String) -> Result<tauri::ipc::Response, AppError> {
+fn read_build_pdf(
+    app: tauri::AppHandle,
+    project_root: String,
+    path: String,
+) -> Result<tauri::ipc::Response, AppError> {
     let root = canonical_root(&project_root)?;
-    let build_root = fs::canonicalize(root.join(BUILD_DIR))?;
+    let build_root = fs::canonicalize(project_build_dir(&root, Some(&app))?)?;
     let source = fs::canonicalize(&path)?;
     if !source.starts_with(build_root)
         || source.extension().and_then(|extension| extension.to_str()) != Some("pdf")
@@ -905,8 +958,8 @@ fn parse_synctex_location(output: &str) -> Option<(&str, usize, usize)> {
     Some((input?, line?.max(1), column))
 }
 
-#[tauri::command]
-async fn inverse_search(
+async fn inverse_search_inner(
+    app: Option<&tauri::AppHandle>,
     project_root: String,
     pdf_path: String,
     page: u32,
@@ -917,7 +970,7 @@ async fn inverse_search(
         return Err(AppError::Message("Posición del PDF inválida".into()));
     }
     let root = canonical_root(&project_root)?;
-    let build_root = fs::canonicalize(root.join(BUILD_DIR))?;
+    let build_root = fs::canonicalize(project_build_dir(&root, app)?)?;
     let pdf = fs::canonicalize(pdf_path)?;
     if !pdf.starts_with(&build_root)
         || pdf.extension().and_then(|extension| extension.to_str()) != Some("pdf")
@@ -961,6 +1014,18 @@ async fn inverse_search(
         line,
         column,
     })
+}
+
+#[tauri::command]
+async fn inverse_search(
+    app: tauri::AppHandle,
+    project_root: String,
+    pdf_path: String,
+    page: u32,
+    x: f64,
+    y: f64,
+) -> Result<SourceLocation, AppError> {
+    inverse_search_inner(Some(&app), project_root, pdf_path, page, x, y).await
 }
 
 #[tauri::command]
@@ -1225,7 +1290,8 @@ mod tests {
         let result = compile_project_inner(None, request)
             .await
             .expect("build for inverse search");
-        let location = inverse_search(
+        let location = inverse_search_inner(
+            None,
             root.to_string_lossy().into_owned(),
             result.pdf_path.expect("compiled pdf"),
             1,
@@ -1294,7 +1360,8 @@ mod tests {
             engine: "lualatex".into(),
             shell_escape: false,
         };
-        clear_build_cache(request.project_root.clone()).expect("clear minted fixture cache");
+        clear_build_cache_inner(None, request.project_root.clone())
+            .expect("clear minted fixture cache");
         let result = compile_project_inner(None, request)
             .await
             .expect("minted build");
@@ -1319,7 +1386,8 @@ mod tests {
             engine: "lualatex".into(),
             shell_escape: false,
         };
-        clear_build_cache(request.project_root.clone()).expect("clear references fixture cache");
+        clear_build_cache_inner(None, request.project_root.clone())
+            .expect("clear references fixture cache");
         let result = compile_project_inner(None, request)
             .await
             .expect("references build");
@@ -1343,6 +1411,36 @@ mod tests {
             assert!(text.contains("Gamma"), "{text}");
             assert!(text.contains("section 1"), "{text}");
         }
+    }
+
+    #[tokio::test]
+    async fn svg_artifacts_stay_inside_the_private_build_directory() {
+        if find_executable("lualatex").is_none()
+            || find_executable("latexmk").is_none()
+            || find_executable("inkscape").is_none()
+        {
+            return;
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("tests/fixtures/svg");
+        clear_build_cache_inner(None, root.to_string_lossy().into_owned())
+            .expect("clear SVG fixture cache");
+        let request = BuildRequest {
+            project_root: root.to_string_lossy().into_owned(),
+            document: "main.tex".into(),
+            engine: "lualatex".into(),
+            shell_escape: true,
+        };
+        let result = compile_project_inner(None, request)
+            .await
+            .expect("SVG build");
+        assert!(result.success, "{}", result.log);
+        assert!(!root.join("svg-inkscape").exists());
+        let generated = root.join(BUILD_DIR).join("build").join("svg-inkscape");
+        assert!(generated.is_dir());
+        assert!(fs::read_dir(generated).expect("SVG artifacts").next().is_some());
     }
 
     #[tokio::test]

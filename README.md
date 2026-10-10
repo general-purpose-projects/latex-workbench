@@ -39,13 +39,13 @@ El producto no impone estructura a los proyectos del usuario. Una carpeta puede 
 
 ## Rendimiento
 
-Los resultados y auxiliares se comparten en `.latex-workbench/build` dentro del proyecto abierto. La huella de compilación incluye contenidos, motor y configuración de seguridad. Si nada cambió, el PDF se recupera sin iniciar TeX; cuando algo cambia, Latexmk reutiliza los auxiliares y ejecuta todas las etapas necesarias hasta converger.
+Los resultados y auxiliares se guardan en la caché privada de Latex Workbench fuera del proyecto. La huella de compilación incluye contenidos, motor y configuración de seguridad. Si nada cambió, el PDF se recupera sin iniciar TeX; cuando algo cambia, Latexmk reutiliza los auxiliares y ejecuta todas las etapas necesarias hasta converger.
 
 ## Seguridad
 
 `shell-escape` permite a documentos LaTeX ejecutar programas externos. Sólo debe activarse en repositorios de confianza. Una futura versión incorporará aislamiento adicional para documentos no confiables.
 
-La carpeta `svg-inkscape` es un resultado temporal generado por el paquete `svg` cuando usa Inkscape para convertir un SVG a un formato que LaTeX pueda incluir. Latex Workbench la oculta del árbol y del ZIP de fuentes porque puede regenerarse; los SVG originales permanecen visibles y no se modifican.
+Los archivos temporales que produce el paquete `svg` al convertir imágenes con Inkscape también se redirigen a esa caché privada. Los SVG originales permanecen en el proyecto y no se modifican.
 
 ## Licencia
 
