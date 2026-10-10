@@ -218,7 +218,7 @@ export default function App() {
   const [building, setBuilding] = useState(false);
   const [build, setBuild] = useState<BuildResult | null>(null);
   const [pdfVersion, setPdfVersion] = useState(0);
-  const [bottomOpen, setBottomOpen] = useState(true);
+  const [bottomOpen, setBottomOpen] = useState(false);
   const [shellEscape, setShellEscape] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [gitOutput, setGitOutput] = useState("");
