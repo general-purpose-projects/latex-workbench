@@ -521,9 +521,22 @@ export default function App() {
                     onClick={() => setBottomTab("build")}
                   >
                     Compilación
-                    {logCounts.error + logCounts.warning > 0
-                      ? <span>{logCounts.error + logCounts.warning}</span>
-                      : null}
+                    {logCounts.error > 0 && (
+                      <span
+                        className="log-count error"
+                        title={`${logCounts.error} ${logCounts.error === 1 ? "error" : "errores"}`}
+                      >
+                        E {logCounts.error}
+                      </span>
+                    )}
+                    {logCounts.warning > 0 && (
+                      <span
+                        className="log-count warning"
+                        title={`${logCounts.warning} ${logCounts.warning === 1 ? "advertencia" : "advertencias"}`}
+                      >
+                        A {logCounts.warning}
+                      </span>
+                    )}
                   </button>
                   <button
                     className={bottomTab === "terminal" ? "active" : ""}

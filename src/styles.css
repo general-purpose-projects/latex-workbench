@@ -133,7 +133,9 @@ body.resize-bottom { cursor: row-resize; }
 .bottom-tabs { height: 100%; display: flex; align-items: center; gap: 3px; }
 .bottom-tabs button { height: 100%; padding: 0 9px; display: flex; align-items: center; gap: 6px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: transparent; font-size: 11px; }
 .bottom-tabs button.active { color: var(--forest); border-bottom-color: var(--forest); font-weight: 700; }
-.bottom-tabs span { min-width: 17px; padding: 1px 4px; border-radius: 8px; color: white; background: #a33d3d; text-align: center; font-size: 9px; }
+.bottom-tabs .log-count { min-width: 22px; padding: 1px 5px; border-radius: 8px; text-align: center; font-size: 9px; font-weight: 800; }
+.bottom-tabs .log-count.error { color: white; background: #a33d3d; }
+.bottom-tabs .log-count.warning { color: #61450d; background: #edc96e; }
 .bottom-actions { display: flex; align-items: center; gap: 5px; }
 .bottom-actions button { min-height: 25px; padding: 0 7px; display: flex; align-items: center; gap: 5px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 10px; }
 .bottom-actions button:hover:not(:disabled) { color: var(--forest); background: var(--forest-soft); }
