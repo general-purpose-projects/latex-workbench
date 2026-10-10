@@ -7,7 +7,7 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU32, Ordering},
@@ -15,7 +15,11 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager};
-use tokio::{process::Command, time::timeout};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+    time::timeout,
+};
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 const BUILD_DIR: &str = ".latex-workbench";
@@ -121,6 +125,13 @@ struct BuildResult {
     pdf_path: Option<String>,
     log: String,
     diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildLogChunk {
+    data: String,
+    stream: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -431,9 +442,7 @@ fn build_command(
         return Ok((engine_path, args));
     }
 
-    if request.profile == "release" {
-        let latexmk = find_executable("latexmk")
-            .ok_or_else(|| AppError::EngineUnavailable("latexmk".into()))?;
+    if let Some(latexmk) = find_executable("latexmk") {
         let mode = match request.engine.as_str() {
             "lualatex" => "-lualatex",
             "xelatex" => "-xelatex",
@@ -468,6 +477,106 @@ fn build_command(
     Ok((engine_path, args))
 }
 
+#[cfg(unix)]
+fn configure_python_compatibility(command: &mut Command, root: &Path) -> Result<(), AppError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let python = ["python3.13", "python3.12", "python3.11"]
+        .into_iter()
+        .find_map(find_executable);
+    let Some(python) = python else {
+        return Ok(());
+    };
+    let bin_dir = root.join(BUILD_DIR).join("runtime-bin");
+    fs::create_dir_all(&bin_dir)?;
+    let shim = bin_dir.join("python3");
+    fs::write(
+        &shim,
+        format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", python.display()),
+    )?;
+    let mut permissions = fs::metadata(&shim)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&shim, permissions)?;
+
+    let mut paths = vec![bin_dir];
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    let path = std::env::join_paths(paths)
+        .map_err(|error| AppError::Message(format!("PATH inválido: {error}")))?;
+    command.env("PATH", path);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn configure_python_compatibility(_command: &mut Command, _root: &Path) -> Result<(), AppError> {
+    Ok(())
+}
+
+async fn stream_build_output<R>(
+    reader: R,
+    app: Option<tauri::AppHandle>,
+    stream: &'static str,
+) -> Result<String, AppError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut reader = reader;
+    let mut bytes = [0_u8; 8192];
+    let mut output = String::new();
+    loop {
+        let read = reader.read(&mut bytes).await?;
+        if read == 0 {
+            break;
+        }
+        let data = String::from_utf8_lossy(&bytes[..read]).into_owned();
+        output.push_str(&data);
+        if let Some(app) = &app {
+            let _ = app.emit("build-log", BuildLogChunk { data, stream });
+        }
+    }
+    Ok(output)
+}
+
+async fn run_build_command(
+    mut command: Command,
+    app: Option<tauri::AppHandle>,
+) -> Result<(ExitStatus, String), AppError> {
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Message("No se pudo leer stdout".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::Message("No se pudo leer stderr".into()))?;
+    let stdout_task = tokio::spawn(stream_build_output(stdout, app.clone(), "stdout"));
+    let stderr_task = tokio::spawn(stream_build_output(stderr, app, "stderr"));
+
+    let process = async move {
+        let status = child.wait().await?;
+        let mut log = stdout_task
+            .await
+            .map_err(|error| AppError::Message(error.to_string()))??;
+        let stderr = stderr_task
+            .await
+            .map_err(|error| AppError::Message(error.to_string()))??;
+        if !stderr.trim().is_empty() {
+            log.push('\n');
+            log.push_str(&stderr);
+        }
+        Ok::<_, AppError>((status, log))
+    };
+    timeout(Duration::from_secs(180), process)
+        .await
+        .map_err(|_| AppError::Timeout)?
+}
+
 fn extract_diagnostics(log: &str) -> Vec<Diagnostic> {
     log.lines()
         .filter_map(|line| {
@@ -492,7 +601,17 @@ fn extract_diagnostics(log: &str) -> Vec<Diagnostic> {
 }
 
 #[tauri::command]
-async fn compile_project(request: BuildRequest) -> Result<BuildResult, AppError> {
+async fn compile_project(
+    app: tauri::AppHandle,
+    request: BuildRequest,
+) -> Result<BuildResult, AppError> {
+    compile_project_inner(Some(app), request).await
+}
+
+async fn compile_project_inner(
+    app: Option<tauri::AppHandle>,
+    request: BuildRequest,
+) -> Result<BuildResult, AppError> {
     let started = Instant::now();
     let root = canonical_root(&request.project_root)?;
     let document_path = project_path(&root, &request.document)?;
@@ -537,23 +656,11 @@ async fn compile_project(request: BuildRequest) -> Result<BuildResult, AppError>
 
     let (program, args) = build_command(&request, &output_dir, &document_path)?;
     let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(&root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let output = timeout(Duration::from_secs(180), command.output())
-        .await
-        .map_err(|_| AppError::Timeout)??;
-    let mut log = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.trim().is_empty() {
-        log.push('\n');
-        log.push_str(&stderr);
-    }
+    command.args(args).current_dir(&root);
+    configure_python_compatibility(&mut command, &root)?;
+    let (status, log) = run_build_command(command, app).await?;
     let pdf_generated = pdf_path.is_file();
-    let success = output.status.success() && pdf_generated;
+    let success = status.success() && pdf_generated;
     if success {
         let fls_name = document_path
             .file_stem()
@@ -787,6 +894,7 @@ fn stop_terminal(state: tauri::State<'_, TerminalState>, id: u32) -> Result<(), 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(TerminalState::default())
         .setup(|app| {
             if cfg!(debug_assertions)
@@ -850,9 +958,13 @@ mod tests {
             profile: "preview".into(),
             shell_escape: false,
         };
-        let first = compile_project(request()).await.expect("first build");
+        let first = compile_project_inner(None, request())
+            .await
+            .expect("first build");
         assert!(first.success);
-        let second = compile_project(request()).await.expect("cached build");
+        let second = compile_project_inner(None, request())
+            .await
+            .expect("cached build");
         assert!(second.success);
         assert!(second.cached);
     }

@@ -134,6 +134,10 @@ body.resize-bottom { cursor: row-resize; }
 .bottom-tabs button { height: 100%; padding: 0 9px; display: flex; align-items: center; gap: 6px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: transparent; font-size: 11px; }
 .bottom-tabs button.active { color: var(--forest); border-bottom-color: var(--forest); font-weight: 700; }
 .bottom-tabs span { min-width: 17px; padding: 1px 4px; border-radius: 8px; color: white; background: #a33d3d; text-align: center; font-size: 9px; }
+.bottom-actions { display: flex; align-items: center; gap: 5px; }
+.bottom-actions button { min-height: 25px; padding: 0 7px; display: flex; align-items: center; gap: 5px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 10px; }
+.bottom-actions button:hover:not(:disabled) { color: var(--forest); background: var(--forest-soft); }
+.bottom-actions button:disabled { opacity: .4; cursor: default; }
 .bottom-close { border: 0; background: transparent; color: var(--muted); }
 .bottom-content { width: 100%; height: 0; flex: 1 1 0; min-width: 0; min-height: 0; overflow-x: auto; overflow-y: scroll; scrollbar-gutter: stable; overscroll-behavior: contain; padding: 7px 11px 14px; color: #28352f; background: #fbfcfa; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; line-height: 1.48; }
 .bottom-content:focus-visible { outline: 2px solid #49a77e; outline-offset: -2px; }

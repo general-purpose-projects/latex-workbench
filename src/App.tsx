@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { latex } from "codemirror-lang-latex";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   BookOpen,
   Box,
@@ -10,6 +12,7 @@ import {
   ChevronDown,
   CircleAlert,
   Code2,
+  Copy,
   Download,
   FileArchive,
   FileText,
@@ -58,6 +61,8 @@ type BuildResult = {
   diagnostics: Diagnostic[];
 };
 
+type BuildLogChunk = { data: string; stream: "stdout" | "stderr" };
+
 const SOURCE_EXTENSIONS = ["tex", "bib", "cls", "sty", "bst", "txt", "md", "toml"];
 
 function basename(path: string) {
@@ -90,6 +95,7 @@ export default function App() {
   const [bottomHeight, setBottomHeight] = useState(220);
   const [bottomTab, setBottomTab] = useState<"build" | "terminal">("build");
   const [terminalStarted, setTerminalStarted] = useState(false);
+  const [liveLog, setLiveLog] = useState("");
   const logScrollRef = useRef<HTMLDivElement>(null);
 
   const dirty = content !== savedContent;
@@ -171,14 +177,28 @@ export default function App() {
   }, [saveCurrent]);
 
   useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<BuildLogChunk>("build-log", (event) => {
+      setLiveLog((current) => current + event.payload.data);
+    }).then((stop) => { unlisten = stop; });
+    return () => unlisten?.();
+  }, []);
+
+  useEffect(() => {
     if (!build?.log || !logScrollRef.current) return;
     logScrollRef.current.scrollTo({ top: 0, left: 0 });
   }, [build?.log]);
+
+  useEffect(() => {
+    if (!building || !logScrollRef.current) return;
+    logScrollRef.current.scrollTo({ top: logScrollRef.current.scrollHeight });
+  }, [building, liveLog]);
 
   const compile = useCallback(async () => {
     if (!project || !documentRoot || building) return;
     if (dirty && !(await saveCurrent())) return;
     setBuilding(true);
+    setLiveLog("Iniciando compilación…\n");
     setBottomOpen(true);
     setBottomTab("build");
     try {
@@ -205,6 +225,17 @@ export default function App() {
       setBuilding(false);
     }
   }, [building, dirty, documentRoot, engine, profile, project, saveCurrent, shellEscape]);
+
+  const copyLogs = useCallback(async () => {
+    const value = building ? liveLog : (build?.log ?? gitOutput);
+    if (!value.trim()) return;
+    try {
+      await writeText(value);
+      showNotice("Logs copiados al portapapeles");
+    } catch (error) {
+      showNotice(`No se pudieron copiar los logs: ${String(error)}`);
+    }
+  }, [build?.log, building, gitOutput, liveLog, showNotice]);
 
   const runGit = useCallback(async (action: "status" | "fetch" | "pull" | "push") => {
     if (!project) return;
@@ -459,7 +490,12 @@ export default function App() {
                     <SquareTerminal size={14} /> Terminal
                   </button>
                 </div>
-                <button className="bottom-close" onClick={() => setBottomOpen(false)} title="Cerrar panel"><X size={15} /></button>
+                <div className="bottom-actions">
+                  <button onClick={copyLogs} title="Copiar logs" disabled={!(building ? liveLog : (build?.log ?? gitOutput))}>
+                    <Copy size={14} /> Copiar logs
+                  </button>
+                  <button className="bottom-close" onClick={() => setBottomOpen(false)} title="Cerrar panel"><X size={15} /></button>
+                </div>
               </div>
               <div
                 ref={logScrollRef}
@@ -468,12 +504,12 @@ export default function App() {
                 aria-label="Registro de compilación"
               >
                 {gitOutput && <pre className="git-output"><Github size={14} /> {gitOutput}</pre>}
-                {build?.diagnostics.map((item, index) => (
+                {!building && build?.diagnostics.map((item, index) => (
                   <div key={`${item.message}-${index}`} className={`diagnostic ${item.severity}`}>
                     <CircleAlert size={15} /> <span>{item.message}</span>
                   </div>
                 ))}
-                <pre className="build-log">{build?.log ?? "Listo para compilar."}</pre>
+                <pre className="build-log">{building ? liveLog : (build?.log ?? "Listo para compilar.")}</pre>
               </div>
               {terminalStarted && (
                 <div className={`terminal-panel ${bottomTab === "terminal" ? "" : "hidden"}`}>
