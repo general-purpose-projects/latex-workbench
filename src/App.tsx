@@ -35,7 +35,7 @@ import {
   X,
 } from "lucide-react";
 import FileTree, { type ProjectFile } from "./FileTree";
-import PdfViewer from "./PdfViewer";
+import PdfViewer, { type SourceLocation } from "./PdfViewer";
 import TerminalPanel from "./TerminalPanel";
 
 type Engine = {
@@ -235,6 +235,7 @@ export default function App() {
   const [editorZoom, setEditorZoom] = useState(initialEditorZoom);
   const logScrollRef = useRef<HTMLDivElement>(null);
   const editorViewRef = useRef<EditorView | null>(null);
+  const pendingSourceLocationRef = useRef<SourceLocation | null>(null);
 
   useEffect(() => () => {
     if (assetUrl) URL.revokeObjectURL(assetUrl);
@@ -300,11 +301,11 @@ export default function App() {
     window.localStorage.setItem(EDITOR_ZOOM_KEY, String(editorZoom));
   }, [editorZoom]);
 
-  const loadFile = useCallback(async (path: string, currentProject = project) => {
-    if (!currentProject || (!isEditable(path) && !isImage(path))) return;
-    if (dirty && activeFile && path !== activeFile) {
+  const loadFile = useCallback(async (path: string, currentProject = project, skipDirtyCheck = false) => {
+    if (!currentProject || (!isEditable(path) && !isImage(path))) return false;
+    if (!skipDirtyCheck && dirty && activeFile && path !== activeFile) {
       const proceed = window.confirm("Hay cambios sin guardar. ¿Deseas descartarlos?");
-      if (!proceed) return;
+      if (!proceed) return false;
     }
     try {
       if (isImage(path)) {
@@ -317,7 +318,7 @@ export default function App() {
         setContent("");
         setSavedContent("");
         setCursorLine(1);
-        return;
+        return true;
       }
       const value = await invoke<string>("read_project_file", {
         projectRoot: currentProject.root,
@@ -328,8 +329,10 @@ export default function App() {
       setSavedContent(value);
       setAssetUrl(null);
       setCursorLine(1);
+      return true;
     } catch (error) {
       showNotice(String(error));
+      return false;
     }
   }, [activeFile, dirty, project, showNotice]);
 
@@ -481,6 +484,37 @@ export default function App() {
     view.focus();
     setCursorLine(item.line);
   }, []);
+
+  const revealSourceLocation = useCallback((view: EditorView, location: SourceLocation) => {
+    const lineNumber = Math.min(Math.max(location.line, 1), view.state.doc.lines);
+    const line = view.state.doc.line(lineNumber);
+    const anchor = Math.min(line.to, line.from + Math.max(0, location.column));
+    view.dispatch({
+      selection: { anchor },
+      effects: EditorView.scrollIntoView(anchor, { y: "center", yMargin: 48 }),
+    });
+    view.focus();
+    setCursorLine(lineNumber);
+  }, []);
+
+  const openSourceLocation = useCallback(async (location: SourceLocation) => {
+    pendingSourceLocationRef.current = location;
+    if (activeFile === location.path && editorViewRef.current) {
+      revealSourceLocation(editorViewRef.current, location);
+      pendingSourceLocationRef.current = null;
+    } else {
+      if (dirty && !(await saveCurrent())) {
+        pendingSourceLocationRef.current = null;
+        return;
+      }
+      const loaded = await loadFile(location.path, project, true);
+      if (!loaded) {
+        pendingSourceLocationRef.current = null;
+        return;
+      }
+    }
+    showNotice(`${location.path} · línea ${location.line}`);
+  }, [activeFile, dirty, loadFile, project, revealSourceLocation, saveCurrent, showNotice]);
 
   const copyLogs = useCallback(async () => {
     const value = building ? liveLog : (build?.log ?? gitOutput);
@@ -767,7 +801,14 @@ export default function App() {
               value={content}
               height="100%"
               extensions={editorExtensions}
-              onCreateEditor={(view) => { editorViewRef.current = view; }}
+              onCreateEditor={(view) => {
+                editorViewRef.current = view;
+                const pending = pendingSourceLocationRef.current;
+                if (pending && pending.path === activeFile) {
+                  window.requestAnimationFrame(() => revealSourceLocation(view, pending));
+                  pendingSourceLocationRef.current = null;
+                }
+              }}
               onChange={setContent}
               theme="light"
               basicSetup={{
@@ -799,7 +840,13 @@ export default function App() {
             )}
           </div>
           {build?.pdfPath ? (
-            <PdfViewer projectRoot={project.root} path={build.pdfPath} version={pdfVersion} />
+            <PdfViewer
+              projectRoot={project.root}
+              path={build.pdfPath}
+              version={pdfVersion}
+              onSourceLocation={(location) => void openSourceLocation(location)}
+              onInverseSearchError={showNotice}
+            />
           ) : (
             <div className="pdf-empty">
               <div className="paper-ghost"><span>TeX</span></div>

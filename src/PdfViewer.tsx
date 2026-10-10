@@ -14,9 +14,10 @@ type PageProps = {
   pageNumber: number;
   scale: number;
   scrollRoot: HTMLElement | null;
+  onInverseSearch: (page: number, x: number, y: number) => void;
 };
 
-function PdfPage({ document, pageNumber, scale, scrollRoot }: PageProps) {
+function PdfPage({ document, pageNumber, scale, scrollRoot, onInverseSearch }: PageProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [page, setPage] = useState<PDFPageProxy | null>(null);
@@ -74,6 +75,15 @@ function PdfPage({ document, pageNumber, scale, scrollRoot }: PageProps) {
       className="pdf-page"
       data-page={pageNumber}
       style={{ width, height }}
+      title="Doble clic para abrir esta posición en el código"
+      onDoubleClick={(event) => {
+        const bounds = event.currentTarget.getBoundingClientRect();
+        onInverseSearch(
+          pageNumber,
+          (event.clientX - bounds.left) / scale,
+          (event.clientY - bounds.top) / scale,
+        );
+      }}
     >
       <canvas ref={canvasRef} aria-label={`Página ${pageNumber}`} />
     </div>
@@ -84,9 +94,13 @@ type Props = {
   projectRoot: string;
   path: string;
   version: number;
+  onSourceLocation: (location: SourceLocation) => void;
+  onInverseSearchError: (message: string) => void;
 };
 
-export default function PdfViewer({ projectRoot, path, version }: Props) {
+export type SourceLocation = { path: string; line: number; column: number };
+
+export default function PdfViewer({ projectRoot, path, version, onSourceLocation, onInverseSearchError }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollRoot, setScrollRoot] = useState<HTMLDivElement | null>(null);
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
@@ -96,6 +110,7 @@ export default function PdfViewer({ projectRoot, path, version }: Props) {
   const [basePage, setBasePage] = useState({ width: 612, height: 792 });
   const [currentPage, setCurrentPage] = useState(1);
   const [zoomOpen, setZoomOpen] = useState(false);
+  const [inverseSearching, setInverseSearching] = useState(false);
   const zoomAnchorRef = useRef<{ page: number; progress: number } | null>(null);
   const restoringZoomRef = useRef(false);
 
@@ -190,6 +205,20 @@ export default function PdfViewer({ projectRoot, path, version }: Props) {
     setZoomPreservingPage(Math.min(400, Math.max(25, numeric + delta)));
   }, [scale, setZoomPreservingPage, zoom]);
 
+  const inverseSearch = useCallback((page: number, x: number, y: number) => {
+    if (inverseSearching) return;
+    setInverseSearching(true);
+    void invoke<SourceLocation>("inverse_search", {
+      projectRoot,
+      pdfPath: path,
+      page,
+      x,
+      y,
+    }).then(onSourceLocation).catch((reason) => {
+      onInverseSearchError(String(reason));
+    }).finally(() => setInverseSearching(false));
+  }, [inverseSearching, onInverseSearchError, onSourceLocation, path, projectRoot]);
+
   useLayoutEffect(() => {
     const anchor = zoomAnchorRef.current;
     if (!anchor) return;
@@ -283,6 +312,7 @@ export default function PdfViewer({ projectRoot, path, version }: Props) {
                 pageNumber={index + 1}
                 scale={scale}
                 scrollRoot={scrollRoot}
+                onInverseSearch={inverseSearch}
               />
             ))}
           </div>

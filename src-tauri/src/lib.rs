@@ -136,6 +136,14 @@ struct BuildLogChunk {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SourceLocation {
+    path: String,
+    line: usize,
+    column: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GitResult {
     success: bool,
     output: String,
@@ -906,6 +914,80 @@ fn read_build_pdf(project_root: String, path: String) -> Result<tauri::ipc::Resp
     Ok(tauri::ipc::Response::new(fs::read(source)?))
 }
 
+fn parse_synctex_location(output: &str) -> Option<(&str, usize, usize)> {
+    let mut input = None;
+    let mut line: Option<usize> = None;
+    let mut column: usize = 0;
+    for value in output.lines().map(str::trim) {
+        if let Some(value) = value.strip_prefix("Input:") {
+            input = Some(value.trim());
+        } else if let Some(value) = value.strip_prefix("Line:") {
+            line = value.trim().parse().ok();
+        } else if let Some(value) = value.strip_prefix("Column:") {
+            column = value.trim().parse::<isize>().unwrap_or(-1).max(0) as usize;
+        }
+    }
+    Some((input?, line?.max(1), column))
+}
+
+#[tauri::command]
+async fn inverse_search(
+    project_root: String,
+    pdf_path: String,
+    page: u32,
+    x: f64,
+    y: f64,
+) -> Result<SourceLocation, AppError> {
+    if page == 0 || !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return Err(AppError::Message("Posición del PDF inválida".into()));
+    }
+    let root = canonical_root(&project_root)?;
+    let build_root = fs::canonicalize(root.join(BUILD_DIR))?;
+    let pdf = fs::canonicalize(pdf_path)?;
+    if !pdf.starts_with(&build_root)
+        || pdf.extension().and_then(|extension| extension.to_str()) != Some("pdf")
+        || !pdf.is_file()
+    {
+        return Err(AppError::InvalidPath(pdf.to_string_lossy().into_owned()));
+    }
+    let synctex = find_executable("synctex")
+        .ok_or_else(|| AppError::EngineUnavailable("synctex".into()))?;
+    let query = format!("{page}:{x:.3}:{y:.3}:{}", pdf.display());
+    let output = Command::new(synctex)
+        .args(["edit", "-o", &query])
+        .current_dir(&root)
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(AppError::Message(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (input, line, column) = parse_synctex_location(&stdout).ok_or_else(|| {
+        AppError::Message("No hay una posición de código asociada a ese punto del PDF".into())
+    })?;
+    let input_path = Path::new(input);
+    let source = fs::canonicalize(if input_path.is_absolute() {
+        input_path.to_path_buf()
+    } else {
+        root.join(input_path)
+    })?;
+    if !source.starts_with(&root) || !source.is_file() {
+        return Err(AppError::InvalidPath(input.to_string()));
+    }
+    let relative = source
+        .strip_prefix(&root)
+        .map_err(|_| AppError::InvalidPath(input.to_string()))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(SourceLocation {
+        path: relative,
+        line,
+        column,
+    })
+}
+
 #[tauri::command]
 fn export_sources(project_root: String, destination: String) -> Result<(), AppError> {
     let root = canonical_root(&project_root)?;
@@ -1114,6 +1196,7 @@ pub fn run() {
             clear_build_cache,
             compile_project,
             read_build_pdf,
+            inverse_search,
             export_pdf,
             export_sources,
             git_action,
@@ -1138,6 +1221,47 @@ mod tests {
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(diagnostics[0].severity, "warning");
         assert_eq!(diagnostics[1].severity, "error");
+    }
+
+    #[test]
+    fn synctex_output_extracts_source_location() {
+        let output = "SyncTeX result begin\nInput:/tmp/project/chapter.tex\nLine:42\nColumn:-1\nSyncTeX result end";
+        assert_eq!(
+            parse_synctex_location(output),
+            Some(("/tmp/project/chapter.tex", 42, 0))
+        );
+    }
+
+    #[tokio::test]
+    async fn inverse_search_resolves_a_compiled_pdf_position() {
+        if find_executable("lualatex").is_none() || find_executable("synctex").is_none() {
+            return;
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("tests/fixtures/basic");
+        let request = BuildRequest {
+            project_root: root.to_string_lossy().into_owned(),
+            document: "main.tex".into(),
+            engine: "lualatex".into(),
+            profile: "preview".into(),
+            shell_escape: false,
+        };
+        let result = compile_project_inner(None, request)
+            .await
+            .expect("build for inverse search");
+        let location = inverse_search(
+            root.to_string_lossy().into_owned(),
+            result.pdf_path.expect("compiled pdf"),
+            1,
+            100.0,
+            100.0,
+        )
+        .await
+        .expect("inverse search result");
+        assert_eq!(location.path, "main.tex");
+        assert!(location.line > 0);
     }
 
     #[test]

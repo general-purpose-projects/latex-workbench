@@ -173,7 +173,7 @@ body.resize-bottom { cursor: row-resize; }
 .pdf-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; background: #cbd0cc; }
 .pdf-pages { min-width: max-content; min-height: 100%; display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 24px; }
 .pdf-page { flex: none; overflow: hidden; background: white; box-shadow: 0 4px 16px rgba(26,37,31,.25); }
-.pdf-page canvas { display: block; }
+.pdf-page canvas { display: block; cursor: text; }
 .pdf-loading { flex: 1; display: grid; place-items: center; color: #5f6b65; font-size: 12px; }
 .pdf-load-error { flex: 1; display: grid; place-items: center; padding: 24px; color: #963838; background: #fff1f1; font-size: 12px; text-align: center; }
 .pdf-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #66726c; }
