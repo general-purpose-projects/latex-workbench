@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
@@ -25,8 +25,10 @@ import {
   Github,
   GitPullRequest,
   LoaderCircle,
+  Minus,
   PanelBottom,
   Play,
+  Plus,
   RefreshCw,
   SquareTerminal,
   Upload,
@@ -71,6 +73,16 @@ type OutlineItem = { command: string; level: number; line: number; title: string
 
 const SOURCE_EXTENSIONS = ["tex", "bib", "cls", "sty", "bst", "txt", "md", "toml"];
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
+const EDITOR_ZOOM_KEY = "latex-workbench.editor-zoom";
+const MIN_EDITOR_ZOOM = 50;
+const MAX_EDITOR_ZOOM = 180;
+
+function initialEditorZoom() {
+  const saved = Number(window.localStorage.getItem(EDITOR_ZOOM_KEY));
+  return Number.isFinite(saved)
+    ? Math.min(MAX_EDITOR_ZOOM, Math.max(MIN_EDITOR_ZOOM, saved))
+    : 100;
+}
 
 function basename(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
@@ -220,6 +232,7 @@ export default function App() {
   const [logFilter, setLogFilter] = useState<LogFilter>("all");
   const [outlineOpen, setOutlineOpen] = useState(true);
   const [cursorLine, setCursorLine] = useState(1);
+  const [editorZoom, setEditorZoom] = useState(initialEditorZoom);
   const logScrollRef = useRef<HTMLDivElement>(null);
   const editorViewRef = useRef<EditorView | null>(null);
 
@@ -278,6 +291,14 @@ export default function App() {
     setNotice(message);
     window.setTimeout(() => setNotice(null), 3200);
   }, []);
+
+  const changeEditorZoom = useCallback((delta: number) => {
+    setEditorZoom((current) => Math.min(MAX_EDITOR_ZOOM, Math.max(MIN_EDITOR_ZOOM, current + delta)));
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(EDITOR_ZOOM_KEY, String(editorZoom));
+  }, [editorZoom]);
 
   const loadFile = useCallback(async (path: string, currentProject = project) => {
     if (!currentProject || (!isEditable(path) && !isImage(path))) return;
@@ -350,11 +371,24 @@ export default function App() {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
         void saveCurrent();
+        return;
+      }
+      const target = event.target instanceof Element ? event.target : null;
+      if ((!event.metaKey && !event.ctrlKey) || !target?.closest(".editor-pane")) return;
+      if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        changeEditorZoom(10);
+      } else if (event.key === "-") {
+        event.preventDefault();
+        changeEditorZoom(-10);
+      } else if (event.key === "0") {
+        event.preventDefault();
+        setEditorZoom(100);
       }
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, [saveCurrent]);
+  }, [changeEditorZoom, saveCurrent]);
 
   useEffect(() => {
     if (!project || !activeFile || !isEditable(activeFile) || !dirty) return;
@@ -691,6 +725,34 @@ export default function App() {
               ))}
               {dirty && <b className="dirty-dot">●</b>}
             </nav>
+            {activeFile && isEditable(activeFile) && (
+              <div className="editor-zoom-controls" role="group" aria-label="Zoom del editor">
+                <button
+                  onClick={() => changeEditorZoom(-10)}
+                  disabled={editorZoom <= MIN_EDITOR_ZOOM}
+                  title="Reducir texto (⌘−)"
+                  aria-label="Reducir texto"
+                >
+                  <Minus size={14} />
+                </button>
+                <button
+                  className="editor-zoom-value"
+                  onClick={() => setEditorZoom(100)}
+                  title="Restablecer zoom (⌘0)"
+                  aria-label={`Zoom del editor ${editorZoom}%. Restablecer`}
+                >
+                  {editorZoom}%
+                </button>
+                <button
+                  onClick={() => changeEditorZoom(10)}
+                  disabled={editorZoom >= MAX_EDITOR_ZOOM}
+                  title="Aumentar texto (⌘+)"
+                  aria-label="Aumentar texto"
+                >
+                  <Plus size={14} />
+                </button>
+              </div>
+            )}
           </div>
           {activeFile && assetUrl ? (
             <div className="asset-preview">
@@ -701,6 +763,7 @@ export default function App() {
             <CodeMirror
               key={activeFile}
               className="editor-codemirror"
+              style={{ "--editor-font-size": `${13 * editorZoom / 100}px` } as CSSProperties}
               value={content}
               height="100%"
               extensions={editorExtensions}

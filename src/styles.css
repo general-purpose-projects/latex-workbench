@@ -128,15 +128,20 @@ body.resize-bottom { cursor: row-resize; }
 .editor-pane, .pdf-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: white; }
 .editor-pane { grid-column: 3; grid-row: 1; overflow: hidden; }
 .pdf-pane { grid-column: 5; grid-row: 1; }
-.pane-header { height: 35px; min-height: 35px; border-bottom: 1px solid #3f4b5d; display: flex; align-items: center; justify-content: space-between; padding: 0 11px; background: #202833; color: #edf1f5; font-size: 11px; }
+.pane-header { height: 35px; min-height: 35px; border-bottom: 1px solid #3f4b5d; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 7px 0 11px; background: #202833; color: #edf1f5; font-size: 11px; }
 .pane-header span, .pane-header small { display: flex; align-items: center; gap: 6px; }
 .pane-header small { color: #aab4c0; }.pane-header small.success { color: #52d293; }.pane-header small.failure { color: #ff8f8f; }
 .breadcrumbs { min-width: 0; display: flex; align-items: center; gap: 4px; overflow: hidden; color: #aeb9c4; white-space: nowrap; }
 .breadcrumbs > span { min-width: 0; display: flex; align-items: center; gap: 3px; overflow: hidden; text-overflow: ellipsis; }
 .breadcrumbs > span.current { color: #f2f5f7; font-weight: 700; }
 .dirty-dot { color: #d49a36; font-size: 9px; }
+.editor-zoom-controls { height: 27px; flex: 0 0 auto; display: flex; align-items: center; border: 1px solid #465264; border-radius: 5px; overflow: hidden; background: #293341; }
+.editor-zoom-controls button { height: 25px; min-width: 26px; padding: 0 5px; display: grid; place-items: center; border: 0; border-radius: 0; color: #e5eaf0; background: transparent; font-size: 10px; }
+.editor-zoom-controls button:hover:not(:disabled) { background: #3a4656; }
+.editor-zoom-controls button:disabled { color: #737f8e; cursor: default; }
+.editor-zoom-controls .editor-zoom-value { min-width: 43px; border-right: 1px solid #465264; border-left: 1px solid #465264; font-variant-numeric: tabular-nums; }
 .editor-codemirror { position: relative; width: 100%; height: 0; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; contain: size layout paint; }
-.editor-codemirror .cm-editor { position: absolute; inset: 0; width: 100%; height: auto !important; max-height: 100%; overflow: hidden; font-size: 13px; }
+.editor-codemirror .cm-editor { position: absolute; inset: 0; width: 100%; height: auto !important; max-height: 100%; overflow: hidden; font-size: var(--editor-font-size, 13px); }
 .editor-codemirror .cm-scroller { height: 100% !important; max-height: 100%; overflow-x: hidden !important; overflow-y: scroll !important; overscroll-behavior: contain; scrollbar-gutter: stable; font-family: "SFMono-Regular", Consolas, monospace; }
 .editor-codemirror .cm-content { width: 100%; min-width: 0; }
 .editor-codemirror .cm-line { max-width: 100%; overflow-wrap: anywhere; }

@@ -215,6 +215,8 @@ export default function PdfViewer({ projectRoot, path, version }: Props) {
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       if (!event.metaKey && !event.ctrlKey) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest(".editor-pane")) return;
       if (event.key === "+" || event.key === "=") {
         event.preventDefault();
         changeZoom(10);
