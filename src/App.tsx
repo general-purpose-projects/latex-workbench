@@ -208,7 +208,6 @@ const overleafHighlightStyle = HighlightStyle.define([
 export default function App() {
   const [engines, setEngines] = useState<Engine[]>([]);
   const [engine, setEngine] = useState("lualatex");
-  const [profile, setProfile] = useState<"preview" | "release">("preview");
   const [project, setProject] = useState<Project | null>(null);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [documentRoot, setDocumentRoot] = useState<string>("");
@@ -445,7 +444,7 @@ export default function App() {
     setBottomTab("build");
     try {
       if (cleanCache) {
-        await invoke("clear_build_cache", { projectRoot: project.root, profile });
+        await invoke("clear_build_cache", { projectRoot: project.root });
         setBuild(null);
         setLiveLog("Caché eliminada. Iniciando compilación completa…\n");
       }
@@ -454,7 +453,6 @@ export default function App() {
           projectRoot: project.root,
           document: documentRoot,
           engine,
-          profile,
           shellEscape,
         },
       });
@@ -471,7 +469,7 @@ export default function App() {
     } finally {
       setBuilding(false);
     }
-  }, [building, dirty, documentRoot, engine, profile, project, saveCurrent, shellEscape]);
+  }, [building, dirty, documentRoot, engine, project, saveCurrent, shellEscape]);
 
   const jumpToOutline = useCallback((item: OutlineItem) => {
     const view = editorViewRef.current;
@@ -659,13 +657,7 @@ export default function App() {
               <ChevronDown size={15} />
             </button>
             <div className="dropdown-menu compile-menu">
-              <span className="menu-heading">Modo de compilación</span>
-              <button className={`mode-option ${profile === "preview" ? "selected" : ""}`} onClick={() => setProfile("preview")}>
-                <Check size={14} /> Vista previa incremental
-              </button>
-              <button className={`mode-option ${profile === "release" ? "selected" : ""}`} onClick={() => setProfile("release")}>
-                <Check size={14} /> Calidad final
-              </button>
+              <span className="menu-heading">Compilación completa incremental</span>
               <label className="menu-toggle" title="Permite a LaTeX ejecutar herramientas externas como Inkscape. Úsalo sólo con proyectos de confianza.">
                 <input type="checkbox" checked={shellEscape} onChange={(event) => setShellEscape(event.target.checked)} />
                 <span><b>Permitir herramientas externas</b><small>Para SVG, minted y procesos auxiliares</small></span>

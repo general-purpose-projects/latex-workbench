@@ -106,7 +106,6 @@ struct BuildRequest {
     project_root: String,
     document: String,
     engine: String,
-    profile: String,
     shell_escape: bool,
 }
 
@@ -427,7 +426,6 @@ fn project_fingerprint(
     hasher.update(BUILD_PIPELINE_VERSION);
     hasher.update(request.document.as_bytes());
     hasher.update(request.engine.as_bytes());
-    hasher.update(request.profile.as_bytes());
     hasher.update(&[request.shell_escape as u8]);
     if let Some(engine) = find_executable(&request.engine) {
         hasher.update(engine.to_string_lossy().as_bytes());
@@ -525,10 +523,10 @@ fn build_command(
         return Ok((engine_path, args));
     }
 
-    // Latexmk reuses the auxiliary files in each profile and only runs the
-    // passes that are needed.  Keeping it in Preview is essential: references
-    // need another TeX pass, while biblatex and traditional bibliographies
-    // additionally need Biber or BibTeX before the final converging pass.
+    // Latexmk reuses the shared auxiliary files and only runs tools whose
+    // inputs changed.  It still converges every build completely: references
+    // get the required extra TeX passes, and bibliographies run Biber or
+    // BibTeX before the final pass whenever their inputs require it.
     if let Some(latexmk) = find_executable("latexmk") {
         let mode = match request.engine.as_str() {
             "lualatex" => "-lualatex",
@@ -789,12 +787,7 @@ async fn compile_project_inner(
     let started = Instant::now();
     let root = canonical_root(&request.project_root)?;
     let document_path = project_path(&root, &request.document)?;
-    let profile = if request.profile == "release" {
-        "release"
-    } else {
-        "preview"
-    };
-    let output_dir = root.join(BUILD_DIR).join(profile);
+    let output_dir = root.join(BUILD_DIR).join("build");
     fs::create_dir_all(&output_dir)?;
     let pdf_name = document_path
         .file_stem()
@@ -858,14 +851,9 @@ async fn compile_project_inner(
 }
 
 #[tauri::command]
-fn clear_build_cache(project_root: String, profile: String) -> Result<(), AppError> {
-    let profile = match profile.as_str() {
-        "preview" => "preview",
-        "release" => "release",
-        _ => return Err(AppError::Message("Perfil de compilación inválido".into())),
-    };
+fn clear_build_cache(project_root: String) -> Result<(), AppError> {
     let root = canonical_root(&project_root)?;
-    let cache = root.join(BUILD_DIR).join(profile);
+    let cache = root.join(BUILD_DIR);
     if let Ok(metadata) = fs::symlink_metadata(&cache) {
         if metadata.file_type().is_symlink() || metadata.is_file() {
             fs::remove_file(&cache)?;
@@ -873,7 +861,7 @@ fn clear_build_cache(project_root: String, profile: String) -> Result<(), AppErr
             fs::remove_dir_all(&cache)?;
         }
     }
-    fs::create_dir_all(cache)?;
+    fs::create_dir_all(cache.join("build"))?;
     Ok(())
 }
 
@@ -1227,12 +1215,11 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("workspace root")
-            .join("tests/fixtures/basic");
+            .join("tests/fixtures/inverse");
         let request = BuildRequest {
             project_root: root.to_string_lossy().into_owned(),
             document: "main.tex".into(),
             engine: "lualatex".into(),
-            profile: "release".into(),
             shell_escape: false,
         };
         let result = compile_project_inner(None, request)
@@ -1257,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_and_release_use_incremental_latexmk() {
+    fn complete_build_uses_incremental_latexmk() {
         if find_executable("lualatex").is_none() || find_executable("latexmk").is_none() {
             return;
         }
@@ -1266,20 +1253,15 @@ mod tests {
             .expect("workspace root")
             .join("tests/fixtures/basic");
         let document = root.join("main.tex");
-        let output = root.join(BUILD_DIR).join("preview");
-        let mut request = BuildRequest {
+        let output = root.join(BUILD_DIR).join("build");
+        let request = BuildRequest {
             project_root: root.to_string_lossy().into_owned(),
             document: "main.tex".into(),
             engine: "lualatex".into(),
-            profile: "preview".into(),
             shell_escape: false,
         };
-        let (preview_program, _) = build_command(&request, &output, &document).expect("preview");
-        assert_eq!(preview_program.file_name().and_then(|name| name.to_str()), Some("latexmk"));
-
-        request.profile = "release".into();
-        let (release_program, _) = build_command(&request, &output, &document).expect("release");
-        assert_eq!(release_program.file_name().and_then(|name| name.to_str()), Some("latexmk"));
+        let (program, _) = build_command(&request, &output, &document).expect("build");
+        assert_eq!(program.file_name().and_then(|name| name.to_str()), Some("latexmk"));
     }
 
     #[test]
@@ -1298,7 +1280,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn minted_preview_compiles_with_restricted_shell_escape() {
+    async fn minted_compiles_with_restricted_shell_escape() {
         if find_executable("lualatex").is_none() || compatible_latexminted_runtime().is_none() {
             return;
         }
@@ -1310,19 +1292,17 @@ mod tests {
             project_root: root.to_string_lossy().into_owned(),
             document: "main.tex".into(),
             engine: "lualatex".into(),
-            profile: "preview".into(),
             shell_escape: false,
         };
-        clear_build_cache(request.project_root.clone(), request.profile.clone())
-            .expect("clear minted fixture cache");
+        clear_build_cache(request.project_root.clone()).expect("clear minted fixture cache");
         let result = compile_project_inner(None, request)
             .await
-            .expect("minted preview build");
+            .expect("minted build");
         assert!(result.success, "{}", result.log);
     }
 
     #[tokio::test]
-    async fn preview_resolves_autoref_and_apa_bibliography() {
+    async fn build_resolves_autoref_and_apa_bibliography() {
         if find_executable("lualatex").is_none()
             || find_executable("latexmk").is_none()
             || find_executable("biber").is_none()
@@ -1337,17 +1317,15 @@ mod tests {
             project_root: root.to_string_lossy().into_owned(),
             document: "main.tex".into(),
             engine: "lualatex".into(),
-            profile: "preview".into(),
             shell_escape: false,
         };
-        clear_build_cache(request.project_root.clone(), request.profile.clone())
-            .expect("clear references fixture cache");
+        clear_build_cache(request.project_root.clone()).expect("clear references fixture cache");
         let result = compile_project_inner(None, request)
             .await
-            .expect("references preview build");
+            .expect("references build");
         assert!(result.success, "{}", result.log);
 
-        let output = root.join(BUILD_DIR).join("preview");
+        let output = root.join(BUILD_DIR).join("build");
         let bbl = fs::read_to_string(output.join("main.bbl")).expect("Biber output");
         assert!(bbl.contains("Gamma"));
         let aux = fs::read_to_string(output.join("main.aux")).expect("LaTeX aux output");
@@ -1380,7 +1358,6 @@ mod tests {
             project_root: root.to_string_lossy().into_owned(),
             document: "main.tex".into(),
             engine: "lualatex".into(),
-            profile: "preview".into(),
             shell_escape: false,
         };
         let first = compile_project_inner(None, request())

@@ -39,7 +39,7 @@ El producto no impone estructura a los proyectos del usuario. Una carpeta puede 
 
 ## Rendimiento
 
-Los resultados se guardan en `.latex-workbench/preview` y `.latex-workbench/release` dentro del proyecto abierto. La huella de compilación incluye contenidos, motor, perfil y configuración de seguridad. Si nada cambió, el PDF se recupera sin iniciar TeX.
+Los resultados y auxiliares se comparten en `.latex-workbench/build` dentro del proyecto abierto. La huella de compilación incluye contenidos, motor y configuración de seguridad. Si nada cambió, el PDF se recupera sin iniciar TeX; cuando algo cambia, Latexmk reutiliza los auxiliares y ejecuta todas las etapas necesarias hasta converger.
 
 ## Seguridad
 
