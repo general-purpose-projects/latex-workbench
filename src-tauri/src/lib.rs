@@ -740,6 +740,26 @@ async fn compile_project_inner(
 }
 
 #[tauri::command]
+fn clear_build_cache(project_root: String, profile: String) -> Result<(), AppError> {
+    let profile = match profile.as_str() {
+        "preview" => "preview",
+        "release" => "release",
+        _ => return Err(AppError::Message("Perfil de compilación inválido".into())),
+    };
+    let root = canonical_root(&project_root)?;
+    let cache = root.join(BUILD_DIR).join(profile);
+    if let Ok(metadata) = fs::symlink_metadata(&cache) {
+        if metadata.file_type().is_symlink() || metadata.is_file() {
+            fs::remove_file(&cache)?;
+        } else {
+            fs::remove_dir_all(&cache)?;
+        }
+    }
+    fs::create_dir_all(cache)?;
+    Ok(())
+}
+
+#[tauri::command]
 fn export_pdf(source: String, destination: String) -> Result<(), AppError> {
     let source = fs::canonicalize(source)?;
     if source.extension().and_then(|ext| ext.to_str()) != Some("pdf") {
@@ -965,6 +985,7 @@ pub fn run() {
             discover_project,
             read_project_file,
             write_project_file,
+            clear_build_cache,
             compile_project,
             read_build_pdf,
             export_pdf,

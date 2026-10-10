@@ -233,15 +233,20 @@ export default function App() {
     logScrollRef.current.scrollTo({ top: logScrollRef.current.scrollHeight });
   }, [building, liveLog]);
 
-  const compile = useCallback(async () => {
+  const compile = useCallback(async (cleanCache = false) => {
     if (!project || !documentRoot || building) return;
     if (dirty && !(await saveCurrent())) return;
     setBuilding(true);
-    setLiveLog("Iniciando compilación…\n");
+    setLiveLog(cleanCache ? "Limpiando caché de compilación…\n" : "Iniciando compilación…\n");
     setLogFilter("all");
     setBottomOpen(true);
     setBottomTab("build");
     try {
+      if (cleanCache) {
+        await invoke("clear_build_cache", { projectRoot: project.root, profile });
+        setBuild(null);
+        setLiveLog("Caché eliminada. Iniciando compilación completa…\n");
+      }
       const result = await invoke<BuildResult>("compile_project", {
         request: {
           projectRoot: project.root,
@@ -398,10 +403,21 @@ export default function App() {
             <button className={profile === "preview" ? "active" : ""} onClick={() => setProfile("preview")}>Preview</button>
             <button className={profile === "release" ? "active" : ""} onClick={() => setProfile("release")}>Release</button>
           </div>
-          <button className="compile-button" onClick={compile} disabled={building || !documentRoot}>
-            {building ? <LoaderCircle className="spin" size={16} /> : <Play size={16} fill="currentColor" />}
-            {building ? "Compilando" : "Compilar"}
-          </button>
+          <div className="compile-actions">
+            <button className="compile-button" onClick={() => void compile()} disabled={building || !documentRoot}>
+              {building ? <LoaderCircle className="spin" size={16} /> : <Play size={16} fill="currentColor" />}
+              {building ? "Compilando" : "Compilar"}
+            </button>
+            <button
+              className="clean-compile-button"
+              onClick={() => void compile(true)}
+              disabled={building || !documentRoot}
+              title="Limpiar caché y compilar"
+              aria-label="Limpiar caché y compilar"
+            >
+              <RefreshCw size={15} />
+            </button>
+          </div>
           <div className="dropdown">
             <button className="icon-button"><Github size={18} /><ChevronDown size={13} /></button>
             <div className="dropdown-menu">
@@ -500,7 +516,7 @@ export default function App() {
               <div className="paper-ghost"><span>TeX</span></div>
               <h2>Tu PDF aparecerá aquí</h2>
               <p>Selecciona un documento raíz y compílalo.</p>
-              <button className="secondary" onClick={compile} disabled={building}><Play size={15} /> Compilar ahora</button>
+              <button className="secondary" onClick={() => void compile()} disabled={building}><Play size={15} /> Compilar ahora</button>
             </div>
           )}
         </section>

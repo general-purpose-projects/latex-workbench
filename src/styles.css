@@ -32,7 +32,7 @@ button { cursor: pointer; }
 .primary, .secondary { border: 0; border-radius: 9px; display: inline-flex; align-items: center; gap: 9px; font-weight: 700; }
 .primary { background: var(--forest); color: white; }
 .primary.large { padding: 13px 20px; margin-top: 16px; }
-.primary:hover, .compile-button:hover { background: var(--forest-dark); }
+.primary:hover, .compile-button:hover, .clean-compile-button:hover { background: var(--forest-dark); }
 .engine-readiness { margin-top: 26px; color: var(--muted); font-size: 13px; }
 .engine-readiness span { display: inline-flex; align-items: center; gap: 7px; }
 
@@ -48,8 +48,10 @@ button { cursor: pointer; }
 .segmented { display: flex; background: #20342a; padding: 2px; border-radius: 7px; }
 .segmented button { border: 0; background: transparent; color: #a8bbb1; padding: 6px 9px; border-radius: 5px; font-size: 11px; }
 .segmented button.active { color: #173226; background: #d8eee3; }
-.compile-button { border: 0; color: white; background: var(--forest); padding: 8px 12px; border-radius: 7px; font-size: 12px; font-weight: 720; display: flex; gap: 7px; align-items: center; }
-.compile-button:disabled { opacity: .6; cursor: default; }
+.compile-actions { display: flex; align-items: stretch; }
+.compile-button { border: 0; color: white; background: var(--forest); padding: 8px 12px; border-radius: 7px 0 0 7px; font-size: 12px; font-weight: 720; display: flex; gap: 7px; align-items: center; }
+.clean-compile-button { width: 31px; padding: 0; display: grid; place-items: center; border: 0; border-left: 1px solid rgba(255,255,255,.24); border-radius: 0 7px 7px 0; color: white; background: var(--forest); }
+.compile-button:disabled, .clean-compile-button:disabled { opacity: .6; cursor: default; }
 .icon-button, .icon-only { border: 0; background: transparent; color: #cedbd4; height: 30px; display: flex; align-items: center; justify-content: center; border-radius: 6px; }
 .icon-button { padding: 0 6px; gap: 1px; }.icon-only { width: 30px; }
 .icon-button:hover, .icon-only:hover { background: #2a4135; }
