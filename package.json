@@ -20,6 +20,7 @@
     "@uiw/react-codemirror": "^4.25.2",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "codemirror-lang-bib": "^0.2.4",
     "codemirror-lang-latex": "^0.6.1",
     "lucide-react": "^0.468.0",
     "pdfjs-dist": "^6.4.299",

@@ -4,6 +4,7 @@ import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import { latex } from "codemirror-lang-latex";
+import { bibtex } from "codemirror-lang-bib";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -186,10 +187,10 @@ const overleafEditorTheme = EditorView.theme({
 });
 
 const overleafHighlightStyle = HighlightStyle.define([
-  { tag: [tags.keyword, tags.heading], color: "#0000e6" },
-  { tag: [tags.className, tags.variableName], color: "#27869b" },
-  { tag: [tags.operator, tags.processingInstruction], color: "#6f3ca0" },
-  { tag: tags.comment, color: "#2f7d32", fontStyle: "italic" },
+  { tag: [tags.keyword, tags.definitionKeyword, tags.heading], color: "#0000e6" },
+  { tag: [tags.className, tags.variableName, tags.propertyName], color: "#27869b" },
+  { tag: [tags.atom, tags.operator, tags.processingInstruction, tags.escape], color: "#6f3ca0" },
+  { tag: [tags.comment, tags.lineComment], color: "#2f7d32", fontStyle: "italic" },
   { tag: [tags.string, tags.meta], color: "#a31515" },
   { tag: tags.number, color: "#202020" },
   { tag: tags.invalid, color: "#c62828", textDecoration: "underline" },
@@ -249,7 +250,14 @@ export default function App() {
     return active;
   }, [cursorLine, outline]);
   const editorExtensions = useMemo(() => [
-    latex({ fileName: activeFile ?? "document.tex" }),
+    activeFile?.toLowerCase().endsWith(".bib")
+      ? bibtex({
+          enableLinting: false,
+          enableTooltips: true,
+          enableAutocomplete: true,
+          autoCloseBrackets: true,
+        })
+      : latex({ fileName: activeFile ?? "document.tex" }),
     EditorView.lineWrapping,
     overleafEditorTheme,
     syntaxHighlighting(overleafHighlightStyle),
