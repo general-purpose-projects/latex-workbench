@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, File, Folder, FolderOpen } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, FolderOpen } from "lucide-react";
 
 export type ProjectFile = {
   path: string;
@@ -17,6 +17,28 @@ type Props = {
 function ancestors(path: string) {
   const parts = path.split("/");
   return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"));
+}
+
+function fileType(name: string) {
+  const extension = name.split(".").pop()?.toLowerCase() ?? "";
+  const types: Record<string, { label: string; tone: string }> = {
+    tex: { label: "TeX", tone: "tex" },
+    bib: { label: "BIB", tone: "bib" },
+    cls: { label: "CLS", tone: "style" },
+    sty: { label: "STY", tone: "style" },
+    bst: { label: "BST", tone: "style" },
+    pdf: { label: "PDF", tone: "pdf" },
+    png: { label: "PNG", tone: "image" },
+    jpg: { label: "JPG", tone: "image" },
+    jpeg: { label: "JPG", tone: "image" },
+    gif: { label: "GIF", tone: "image" },
+    webp: { label: "WEBP", tone: "image" },
+    svg: { label: "SVG", tone: "image" },
+    md: { label: "MD", tone: "text" },
+    txt: { label: "TXT", tone: "text" },
+    toml: { label: "CFG", tone: "config" },
+  };
+  return types[extension] ?? { label: extension.slice(0, 4).toUpperCase() || "FILE", tone: "other" };
 }
 
 export default function FileTree({ files, activeFile, onOpen }: Props) {
@@ -40,6 +62,7 @@ export default function FileTree({ files, activeFile, onOpen }: Props) {
       {visibleFiles.map((item) => {
         const isFolder = item.kind === "directory";
         const isExpanded = expanded.has(item.path);
+        const type = fileType(item.name);
         return (
           <button
             key={item.path}
@@ -55,7 +78,7 @@ export default function FileTree({ files, activeFile, onOpen }: Props) {
             </span>
             {isFolder
               ? (isExpanded ? <FolderOpen size={14} /> : <Folder size={14} />)
-              : <File size={14} />}
+              : <span className={`file-type-badge ${type.tone}`}>{type.label}</span>}
             <span>{item.name}</span>
           </button>
         );

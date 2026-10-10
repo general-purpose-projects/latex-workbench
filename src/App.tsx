@@ -23,6 +23,7 @@ import {
   FolderGit2,
   Github,
   GitPullRequest,
+  ImagePlus,
   LoaderCircle,
   PanelBottom,
   Play,
@@ -71,6 +72,7 @@ type LogEntry = { id: number; level: LogLevel; message: string };
 type OutlineItem = { command: string; level: number; line: number; title: string };
 
 const SOURCE_EXTENSIONS = ["tex", "bib", "cls", "sty", "bst", "txt", "md", "toml"];
+const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
 
 function basename(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
@@ -79,6 +81,18 @@ function basename(path: string) {
 function isEditable(path: string) {
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
   return SOURCE_EXTENSIONS.includes(extension);
+}
+
+function isImage(path: string) {
+  const extension = path.split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_EXTENSIONS.includes(extension);
+}
+
+function imageMime(path: string) {
+  const extension = path.split(".").pop()?.toLowerCase();
+  if (extension === "svg") return "image/svg+xml";
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  return `image/${extension ?? "png"}`;
 }
 
 function logLevel(message: string): LogLevel {
@@ -190,6 +204,7 @@ export default function App() {
   const [documentRoot, setDocumentRoot] = useState<string>("");
   const [content, setContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
+  const [assetUrl, setAssetUrl] = useState<string | null>(null);
   const [building, setBuilding] = useState(false);
   const [build, setBuild] = useState<BuildResult | null>(null);
   const [pdfVersion, setPdfVersion] = useState(0);
@@ -208,6 +223,10 @@ export default function App() {
   const [cursorLine, setCursorLine] = useState(1);
   const logScrollRef = useRef<HTMLDivElement>(null);
   const editorViewRef = useRef<EditorView | null>(null);
+
+  useEffect(() => () => {
+    if (assetUrl) URL.revokeObjectURL(assetUrl);
+  }, [assetUrl]);
 
   const dirty = content !== savedContent;
   const availableEngines = engines.filter((item) => item.available);
@@ -255,12 +274,24 @@ export default function App() {
   }, []);
 
   const loadFile = useCallback(async (path: string, currentProject = project) => {
-    if (!currentProject || !isEditable(path)) return;
+    if (!currentProject || (!isEditable(path) && !isImage(path))) return;
     if (dirty && activeFile && path !== activeFile) {
       const proceed = window.confirm("Hay cambios sin guardar. ¿Deseas descartarlos?");
       if (!proceed) return;
     }
     try {
+      if (isImage(path)) {
+        const value = await invoke<ArrayBuffer>("read_project_asset", {
+          projectRoot: currentProject.root,
+          path,
+        });
+        setAssetUrl(URL.createObjectURL(new Blob([new Uint8Array(value)], { type: imageMime(path) })));
+        setActiveFile(path);
+        setContent("");
+        setSavedContent("");
+        setCursorLine(1);
+        return;
+      }
       const value = await invoke<string>("read_project_file", {
         projectRoot: currentProject.root,
         path,
@@ -268,6 +299,7 @@ export default function App() {
       setActiveFile(path);
       setContent(value);
       setSavedContent(value);
+      setAssetUrl(null);
       setCursorLine(1);
     } catch (error) {
       showNotice(String(error));
@@ -292,6 +324,7 @@ export default function App() {
 
   const saveCurrent = useCallback(async () => {
     if (!project || !activeFile) return false;
+    if (!isEditable(activeFile)) return true;
     try {
       await invoke("write_project_file", {
         projectRoot: project.root,
@@ -305,6 +338,41 @@ export default function App() {
       return false;
     }
   }, [activeFile, content, project, showNotice]);
+
+  const insertImage = useCallback(async () => {
+    if (!project) return;
+    const selected = await open({
+      multiple: false,
+      title: "Insertar imagen sin recomprimir",
+      filters: [{ name: "Imágenes", extensions: IMAGE_EXTENSIONS }],
+    });
+    if (!selected || Array.isArray(selected)) return;
+    try {
+      const relativePath = await invoke<string>("import_project_image", {
+        projectRoot: project.root,
+        source: selected,
+      });
+      const refreshed = await invoke<Project>("discover_project", { root: project.root });
+      setProject(refreshed);
+      const view = editorViewRef.current;
+      if (view && activeFile && isEditable(activeFile)) {
+        const isSvg = relativePath.toLowerCase().endsWith(".svg");
+        const sourcePath = isSvg ? relativePath.replace(/\.svg$/i, "") : relativePath;
+        const command = isSvg
+          ? `\n\\begin{figure}[htbp]\n  \\centering\n  \\includesvg[width=\\textwidth,inkscapelatex=false]{${sourcePath}}\n  \\caption{}\n\\end{figure}\n`
+          : `\n\\begin{figure}[htbp]\n  \\centering\n  \\includegraphics[width=\\textwidth]{${sourcePath}}\n  \\caption{}\n\\end{figure}\n`;
+        const { from, to } = view.state.selection.main;
+        view.dispatch({ changes: { from, to, insert: command }, selection: { anchor: from + command.length } });
+        view.focus();
+        showNotice("Imagen copiada sin pérdida e insertada en el documento");
+      } else {
+        await loadFile(relativePath, refreshed);
+        showNotice("Imagen copiada sin pérdida al proyecto");
+      }
+    } catch (error) {
+      showNotice(String(error));
+    }
+  }, [activeFile, loadFile, project, showNotice]);
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
@@ -415,9 +483,10 @@ export default function App() {
 
   const exportCurrentPdf = useCallback(async () => {
     if (!build?.pdfPath) return;
+    const defaultPath = await invoke<string>("default_download_path", { fileName: basename(build.pdfPath) });
     const destination = await save({
       title: "Exportar PDF",
-      defaultPath: basename(build.pdfPath),
+      defaultPath,
       filters: [{ name: "PDF", extensions: ["pdf"] }],
     });
     if (!destination) return;
@@ -427,9 +496,10 @@ export default function App() {
 
   const exportProject = useCallback(async () => {
     if (!project) return;
+    const defaultPath = await invoke<string>("default_download_path", { fileName: `${project.name}.zip` });
     const destination = await save({
       title: "Exportar código fuente",
-      defaultPath: `${project.name}.zip`,
+      defaultPath,
       filters: [{ name: "Archivo ZIP", extensions: ["zip"] }],
     });
     if (!destination) return;
@@ -513,44 +583,51 @@ export default function App() {
               </option>
             ))}
           </select>
-          <div className="segmented">
-            <button className={profile === "preview" ? "active" : ""} onClick={() => setProfile("preview")}>Preview</button>
-            <button className={profile === "release" ? "active" : ""} onClick={() => setProfile("release")}>Release</button>
-          </div>
-          <div className="compile-actions">
+          <div className="compile-actions dropdown">
             <button className="compile-button" onClick={() => void compile()} disabled={building || !documentRoot}>
               {building ? <LoaderCircle className="spin" size={16} /> : <Play size={16} fill="currentColor" />}
               {building ? "Compilando" : "Compilar"}
             </button>
             <button
               className="clean-compile-button"
-              onClick={() => void compile(true)}
-              disabled={building || !documentRoot}
-              title="Limpiar caché y compilar"
-              aria-label="Limpiar caché y compilar"
+              title="Opciones de compilación"
+              aria-label="Opciones de compilación"
             >
-              <RefreshCw size={15} />
+              <ChevronDown size={15} />
             </button>
+            <div className="dropdown-menu compile-menu">
+              <span className="menu-heading">Modo de compilación</span>
+              <button className={`mode-option ${profile === "preview" ? "selected" : ""}`} onClick={() => setProfile("preview")}>
+                <Check size={14} /> Vista previa rápida
+              </button>
+              <button className={`mode-option ${profile === "release" ? "selected" : ""}`} onClick={() => setProfile("release")}>
+                <Check size={14} /> Calidad final
+              </button>
+              <label className="menu-toggle" title="Permite a LaTeX ejecutar herramientas externas como Inkscape. Úsalo sólo con proyectos de confianza.">
+                <input type="checkbox" checked={shellEscape} onChange={(event) => setShellEscape(event.target.checked)} />
+                <span><b>Permitir herramientas externas</b><small>Para SVG, minted y procesos auxiliares</small></span>
+              </label>
+              <button onClick={() => void compile(true)} disabled={building || !documentRoot}>
+                <RefreshCw size={14} /> Limpiar caché y compilar
+              </button>
+            </div>
+          </div>
+          <div className="dropdown">
+            <button className="icon-button download-button" title="Descargar"><Download size={18} /><ChevronDown size={13} /></button>
+            <div className="dropdown-menu right">
+              <button onClick={exportCurrentPdf} disabled={!build?.pdfPath}><FileText size={15} /> Exportar PDF</button>
+              <button onClick={exportProject}><FileArchive size={15} /> Exportar fuentes ZIP</button>
+            </div>
           </div>
           <div className="dropdown">
             <button className="icon-button"><Github size={18} /><ChevronDown size={13} /></button>
-            <div className="dropdown-menu">
+            <div className="dropdown-menu right">
               <button onClick={() => runGit("status")}><GitPullRequest size={15} /> Estado</button>
               <button onClick={() => runGit("fetch")}><RefreshCw size={15} /> Fetch</button>
               <button onClick={() => runGit("pull")}><Download size={15} /> Pull</button>
               <button onClick={() => runGit("push")}><Upload size={15} /> Push</button>
             </div>
           </div>
-          <div className="dropdown">
-            <button className="icon-button"><Download size={18} /><ChevronDown size={13} /></button>
-            <div className="dropdown-menu right">
-              <button onClick={exportCurrentPdf} disabled={!build?.pdfPath}><FileText size={15} /> Exportar PDF</button>
-              <button onClick={exportProject}><FileArchive size={15} /> Exportar fuentes ZIP</button>
-            </div>
-          </div>
-          <button className="icon-only" title="Guardar" onClick={saveCurrent}><Save size={18} /></button>
-          <button className="icon-only" title="Abrir terminal" onClick={openTerminal}><SquareTerminal size={18} /></button>
-          <button className="icon-only" title="Abrir otro proyecto" onClick={chooseProject}><Folder size={18} /></button>
         </div>
       </header>
 
@@ -562,11 +639,6 @@ export default function App() {
         }}
       >
         <aside className="sidebar">
-          <div className="sidebar-tabs">
-            <button className="active"><Folder size={17} /></button>
-            <button><BookOpen size={17} /></button>
-            <button><Github size={17} /></button>
-          </div>
           <div className="sidebar-title"><span>ARCHIVOS</span><button onClick={chooseProject}><Folder size={14} /></button></div>
           <FileTree key={project.root} files={project.files} activeFile={activeFile} onOpen={loadFile} />
           <section className={`file-outline ${outlineOpen ? "open" : "collapsed"}`}>
@@ -601,10 +673,6 @@ export default function App() {
               </div>
             )}
           </section>
-          <label className="security-toggle" title="Permite ejecutar herramientas externas. Actívalo sólo en proyectos de confianza.">
-            <input type="checkbox" checked={shellEscape} onChange={(event) => setShellEscape(event.target.checked)} />
-            <span>Shell escape</span>
-          </label>
         </aside>
 
         <div
@@ -616,10 +684,29 @@ export default function App() {
 
         <section className="editor-pane">
           <div className="pane-header">
-            <span><FileText size={14} /> {activeFile ?? "Sin archivo"}{dirty && <b className="dirty-dot">●</b>}</span>
-            <small>{engine} · {profile}</small>
+            <nav className="breadcrumbs" aria-label="Ruta del archivo">
+              <Folder size={14} />
+              <span>{project.name}</span>
+              {activeFile?.split("/").map((part, index, parts) => (
+                <span className={index === parts.length - 1 ? "current" : ""} key={`${part}-${index}`}>
+                  <ChevronRight size={12} /> {part}
+                </span>
+              ))}
+              {dirty && <b className="dirty-dot">●</b>}
+            </nav>
+            <div className="pane-header-actions">
+              {activeFile && isEditable(activeFile) && (
+                <button onClick={insertImage} title="Insertar imagen sin pérdida"><ImagePlus size={14} /> Imagen</button>
+              )}
+              <small>{engine} · {profile}</small>
+            </div>
           </div>
-          {activeFile ? (
+          {activeFile && assetUrl ? (
+            <div className="asset-preview">
+              <img src={assetUrl} alt={basename(activeFile)} />
+              <span>{activeFile}</span>
+            </div>
+          ) : activeFile && isEditable(activeFile) ? (
             <CodeMirror
               key={activeFile}
               className="editor-codemirror"
@@ -637,7 +724,7 @@ export default function App() {
                 autocompletion: true,
               }}
             />
-          ) : <div className="empty-pane">Selecciona un archivo editable</div>}
+          ) : <div className="empty-pane">Selecciona un archivo de texto o una imagen</div>}
         </section>
 
         <div
@@ -664,7 +751,14 @@ export default function App() {
               <div className="paper-ghost"><span>TeX</span></div>
               <h2>Tu PDF aparecerá aquí</h2>
               <p>Selecciona un documento raíz y compílalo.</p>
-              <button className="secondary" onClick={() => void compile()} disabled={building}><Play size={15} /> Compilar ahora</button>
+              <div className="pdf-empty-actions">
+                <button className="primary empty-compile" onClick={() => void compile()} disabled={building || !documentRoot}>
+                  {building ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />} Compilar ahora
+                </button>
+                <button className="secondary" onClick={() => void compile(true)} disabled={building || !documentRoot}>
+                  <RefreshCw size={15} /> Limpiar caché y compilar
+                </button>
+              </div>
             </div>
           )}
         </section>
@@ -685,22 +779,6 @@ export default function App() {
                     onClick={() => setBottomTab("build")}
                   >
                     Compilación
-                    {logCounts.error > 0 && (
-                      <span
-                        className="log-count error"
-                        title={`${logCounts.error} ${logCounts.error === 1 ? "error" : "errores"}`}
-                      >
-                        E {logCounts.error}
-                      </span>
-                    )}
-                    {logCounts.warning > 0 && (
-                      <span
-                        className="log-count warning"
-                        title={`${logCounts.warning} ${logCounts.warning === 1 ? "advertencia" : "advertencias"}`}
-                      >
-                        A {logCounts.warning}
-                      </span>
-                    )}
                   </button>
                   <button
                     className={bottomTab === "terminal" ? "active" : ""}
@@ -767,7 +845,9 @@ export default function App() {
       <footer className="statusbar">
         <span>{dirty ? "Cambios sin guardar" : "Guardado"}</span>
         <span className="spacer" />
+        <button onClick={saveCurrent} disabled={!activeFile || !isEditable(activeFile)}><Save size={14} /> Guardar</button>
         <button onClick={openTerminal}><SquareTerminal size={14} /> Terminal</button>
+        <button onClick={chooseProject}><Folder size={14} /> Abrir proyecto</button>
         <button onClick={() => setBottomOpen((value) => !value)}><PanelBottom size={14} /> Panel</button>
         <span>{project.files.filter((item) => item.kind === "file").length} archivos</span>
         <span><Box size={13} /> {availableEngines.length} motores</span>

@@ -145,6 +145,7 @@ fn ignored_entry(entry: &DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
     !(name == ".git"
         || name == BUILD_DIR
+        || name == "svg-inkscape"
         || name == "node_modules"
         || name == "target"
         || name == ".DS_Store")
@@ -299,6 +300,78 @@ fn read_project_file(project_root: String, path: String) -> Result<String, AppEr
     let root = canonical_root(&project_root)?;
     let path = project_path(&root, &path)?;
     fs::read_to_string(path).map_err(AppError::from)
+}
+
+#[tauri::command]
+fn read_project_asset(
+    project_root: String,
+    path: String,
+) -> Result<tauri::ipc::Response, AppError> {
+    let root = canonical_root(&project_root)?;
+    let path = project_path(&root, &path)?;
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !["png", "jpg", "jpeg", "gif", "webp", "svg"].contains(&extension.as_str()) {
+        return Err(AppError::InvalidPath(path.to_string_lossy().into_owned()));
+    }
+    Ok(tauri::ipc::Response::new(fs::read(path)?))
+}
+
+#[tauri::command]
+fn import_project_image(project_root: String, source: String) -> Result<String, AppError> {
+    let root = canonical_root(&project_root)?;
+    let source = fs::canonicalize(source)?;
+    if !source.is_file() {
+        return Err(AppError::InvalidPath(source.to_string_lossy().into_owned()));
+    }
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !["png", "jpg", "jpeg", "gif", "webp", "svg"].contains(&extension.as_str()) {
+        return Err(AppError::Message("El formato de imagen no es compatible".into()));
+    }
+
+    let images = root.join("images");
+    fs::create_dir_all(&images)?;
+    if source.parent() == Some(images.as_path()) {
+        return source
+            .strip_prefix(&root)
+            .map(|value| value.to_string_lossy().replace('\\', "/"))
+            .map_err(|_| AppError::InvalidPath(source.to_string_lossy().into_owned()));
+    }
+
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("imagen");
+    let mut destination = images.join(format!("{stem}.{extension}"));
+    let mut suffix = 2;
+    while destination.exists() {
+        destination = images.join(format!("{stem}-{suffix}.{extension}"));
+        suffix += 1;
+    }
+    fs::copy(&source, &destination)?;
+    destination
+        .strip_prefix(&root)
+        .map(|value| value.to_string_lossy().replace('\\', "/"))
+        .map_err(|_| AppError::InvalidPath(destination.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn default_download_path(app: tauri::AppHandle, file_name: String) -> Result<String, AppError> {
+    let safe_name = Path::new(&file_name)
+        .file_name()
+        .ok_or_else(|| AppError::InvalidPath(file_name.clone()))?;
+    let downloads = app
+        .path()
+        .download_dir()
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    Ok(downloads.join(safe_name).to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -984,6 +1057,9 @@ pub fn run() {
             list_engines,
             discover_project,
             read_project_file,
+            read_project_asset,
+            import_project_image,
+            default_download_path,
             write_project_file,
             clear_build_cache,
             compile_project,
