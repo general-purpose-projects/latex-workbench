@@ -570,6 +570,23 @@ fn build_command(
 }
 
 #[cfg(unix)]
+fn compatible_latexminted_runtime() -> Option<(PathBuf, PathBuf)> {
+    let latexminted = find_executable("latexminted")?;
+    ["python3.13", "python3.12", "python3.11"]
+        .into_iter()
+        .filter_map(find_executable)
+        .find(|python| {
+            std::process::Command::new(python)
+                .arg(&latexminted)
+                .arg("--version")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        })
+        .map(|python| (python, latexminted))
+}
+
+#[cfg(unix)]
 fn configure_runtime_compatibility(
     command: &mut Command,
     root: &Path,
@@ -583,18 +600,32 @@ fn configure_runtime_compatibility(
         .join("runtime-bin");
     fs::create_dir_all(&bin_dir)?;
 
-    let python = ["python3.13", "python3.12", "python3.11"]
-        .into_iter()
-        .find_map(find_executable);
-    if let Some(python) = python {
-        let shim = bin_dir.join("python3");
+    if let Some((python, latexminted)) = compatible_latexminted_runtime() {
+        let python_shim = bin_dir.join("python3");
         fs::write(
-            &shim,
+            &python_shim,
             format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", python.display()),
         )?;
-        let mut permissions = fs::metadata(&shim)?.permissions();
+        let mut permissions = fs::metadata(&python_shim)?.permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(&shim, permissions)?;
+        fs::set_permissions(&python_shim, permissions)?;
+
+        // TeX Live invokes latexminted through restricted shell escape.  Its
+        // upstream /usr/bin/env python3 shebang can otherwise select a newer,
+        // incompatible system Python before our project is processed.  Keep
+        // the trusted executable name but pin both interpreter and script.
+        let latexminted_shim = bin_dir.join("latexminted");
+        fs::write(
+            &latexminted_shim,
+            format!(
+                "#!/bin/sh\nexec \"{}\" \"{}\" \"$@\"\n",
+                python.display(),
+                latexminted.display()
+            ),
+        )?;
+        let mut permissions = fs::metadata(&latexminted_shim)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&latexminted_shim, permissions)?;
     }
 
     install_compatible_biber(&bin_dir)?;
@@ -1138,6 +1169,45 @@ mod tests {
         request.profile = "release".into();
         let (release_program, _) = build_command(&request, &output, &document).expect("release");
         assert_eq!(release_program.file_name().and_then(|name| name.to_str()), Some("latexmk"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn latexminted_runtime_uses_a_compatible_python() {
+        let Some((python, latexminted)) = compatible_latexminted_runtime() else {
+            return;
+        };
+        let output = std::process::Command::new(python)
+            .arg(latexminted)
+            .arg("--version")
+            .output()
+            .expect("latexminted version check");
+        assert!(output.status.success());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn minted_preview_compiles_with_restricted_shell_escape() {
+        if find_executable("lualatex").is_none() || compatible_latexminted_runtime().is_none() {
+            return;
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("tests/fixtures/minted");
+        let request = BuildRequest {
+            project_root: root.to_string_lossy().into_owned(),
+            document: "main.tex".into(),
+            engine: "lualatex".into(),
+            profile: "preview".into(),
+            shell_escape: false,
+        };
+        clear_build_cache(request.project_root.clone(), request.profile.clone())
+            .expect("clear minted fixture cache");
+        let result = compile_project_inner(None, request)
+            .await
+            .expect("minted preview build");
+        assert!(result.success, "{}", result.log);
     }
 
     #[tokio::test]
