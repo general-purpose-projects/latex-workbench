@@ -192,7 +192,7 @@ export default function App() {
         },
       });
       setBuild(result);
-      if (result.success) setPdfVersion((version) => version + 1);
+      if (result.pdfPath) setPdfVersion((version) => version + 1);
     } catch (error) {
       setBuild({
         success: false,

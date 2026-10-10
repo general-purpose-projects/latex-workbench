@@ -528,6 +528,13 @@ async fn compile_project(request: BuildRequest) -> Result<BuildResult, AppError>
         });
     }
 
+    // Never mistake a PDF from an older build for an artifact produced by the
+    // current command. TeX may still create a usable PDF before returning a
+    // non-zero status because of a later auxiliary-tool error.
+    if pdf_path.is_file() {
+        fs::remove_file(&pdf_path)?;
+    }
+
     let (program, args) = build_command(&request, &output_dir, &document_path)?;
     let mut command = Command::new(program);
     command
@@ -545,7 +552,8 @@ async fn compile_project(request: BuildRequest) -> Result<BuildResult, AppError>
         log.push('\n');
         log.push_str(&stderr);
     }
-    let success = output.status.success() && pdf_path.is_file();
+    let pdf_generated = pdf_path.is_file();
+    let success = output.status.success() && pdf_generated;
     if success {
         let fls_name = document_path
             .file_stem()
@@ -562,7 +570,7 @@ async fn compile_project(request: BuildRequest) -> Result<BuildResult, AppError>
         success,
         cached: false,
         duration_ms: started.elapsed().as_millis(),
-        pdf_path: success.then(|| pdf_path.to_string_lossy().into_owned()),
+        pdf_path: pdf_generated.then(|| pdf_path.to_string_lossy().into_owned()),
         log,
         diagnostics,
     })
