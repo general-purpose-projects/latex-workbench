@@ -388,6 +388,7 @@ export default function App() {
           </div>
           {activeFile ? (
             <CodeMirror
+              className="editor-codemirror"
               value={content}
               height="100%"
               extensions={[latex({ fileName: activeFile })]}
