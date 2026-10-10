@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { ChevronDown, ChevronUp, Minus, Plus } from "lucide-react";
 import * as pdfjs from "pdfjs-dist";
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
@@ -74,11 +74,12 @@ function PdfPage({ document, pageNumber, scale }: PageProps) {
 }
 
 type Props = {
+  projectRoot: string;
   path: string;
   version: number;
 };
 
-export default function PdfViewer({ path, version }: Props) {
+export default function PdfViewer({ projectRoot, path, version }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -89,19 +90,32 @@ export default function PdfViewer({ path, version }: Props) {
   const [zoomOpen, setZoomOpen] = useState(false);
 
   useEffect(() => {
-    const task = pdfjs.getDocument({ url: `${convertFileSrc(path)}?v=${version}` });
+    let task: ReturnType<typeof pdfjs.getDocument> | null = null;
+    let disposed = false;
     setDocument(null);
     setError(null);
-    void task.promise
+    void invoke<ArrayBuffer>("read_build_pdf", { projectRoot, path })
+      .then((buffer) => {
+        if (disposed) return null;
+        task = pdfjs.getDocument({ data: new Uint8Array(buffer) });
+        return task.promise;
+      })
       .then(async (loaded) => {
+        if (!loaded || disposed) return;
         setDocument(loaded);
         const first = await loaded.getPage(1);
+        if (disposed) return;
         const viewport = first.getViewport({ scale: 1 });
         setBasePage({ width: viewport.width, height: viewport.height });
       })
-      .catch((reason) => setError(String(reason)));
-    return () => { void task.destroy(); };
-  }, [path, version]);
+      .catch((reason) => {
+        if (!disposed) setError(String(reason));
+      });
+    return () => {
+      disposed = true;
+      if (task) void task.destroy();
+    };
+  }, [path, projectRoot, version]);
 
   useEffect(() => {
     const element = scrollRef.current;

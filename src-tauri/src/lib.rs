@@ -587,6 +587,20 @@ fn export_pdf(source: String, destination: String) -> Result<(), AppError> {
 }
 
 #[tauri::command]
+fn read_build_pdf(project_root: String, path: String) -> Result<tauri::ipc::Response, AppError> {
+    let root = canonical_root(&project_root)?;
+    let build_root = fs::canonicalize(root.join(BUILD_DIR))?;
+    let source = fs::canonicalize(&path)?;
+    if !source.starts_with(build_root)
+        || source.extension().and_then(|extension| extension.to_str()) != Some("pdf")
+        || !source.is_file()
+    {
+        return Err(AppError::InvalidPath(path));
+    }
+    Ok(tauri::ipc::Response::new(fs::read(source)?))
+}
+
+#[tauri::command]
 fn export_sources(project_root: String, destination: String) -> Result<(), AppError> {
     let root = canonical_root(&project_root)?;
     let file = fs::File::create(destination)?;
@@ -788,6 +802,7 @@ pub fn run() {
             read_project_file,
             write_project_file,
             compile_project,
+            read_build_pdf,
             export_pdf,
             export_sources,
             git_action,

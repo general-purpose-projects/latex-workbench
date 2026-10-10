@@ -423,7 +423,7 @@ export default function App() {
             )}
           </div>
           {build?.pdfPath ? (
-            <PdfViewer path={build.pdfPath} version={pdfVersion} />
+            <PdfViewer projectRoot={project.root} path={build.pdfPath} version={pdfVersion} />
           ) : (
             <div className="pdf-empty">
               <div className="paper-ghost"><span>TeX</span></div>
