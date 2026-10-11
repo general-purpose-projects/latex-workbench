@@ -2,6 +2,8 @@
 
 Latex Workbench es una aplicación de escritorio local para editar, compilar y exportar proyectos LaTeX. Ofrece un flujo de trabajo de tres paneles inspirado en Overleaf, pero trabaja directamente con carpetas locales y repositorios Git: tus fuentes y recursos permanecen en tu equipo.
 
+Al iniciar, puedes abrir un proyecto existente o crear un artículo, una tesis, una presentación Beamer o una carta desde una plantilla. La app solo crea la estructura nueva dentro de una carpeta vacía que selecciones.
+
 ## Arquitectura
 
 ```mermaid

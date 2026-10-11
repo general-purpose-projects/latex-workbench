@@ -682,6 +682,212 @@ fn save_project_config(project_root: String, config: ProjectConfig) -> Result<()
     Ok(())
 }
 
+fn project_template_files(template: &str) -> Result<Vec<(&'static str, &'static str)>, AppError> {
+    match template {
+        "article" => Ok(vec![
+            (
+                "main.tex",
+                r"\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{graphicx}
+\usepackage{hyperref}
+
+\title{Título del artículo}
+\author{Nombre del autor}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Escribe aquí un resumen breve del artículo.
+\end{abstract}
+
+\section{Introducción}
+Comienza a escribir tu documento aquí.
+
+\section{Conclusiones}
+
+\end{document}
+",
+            ),
+            (
+                "references.bib",
+                r"@book{lamport1994,
+  author    = {Leslie Lamport},
+  title     = {LaTeX: A Document Preparation System},
+  year      = {1994},
+  publisher = {Addison-Wesley}
+}
+",
+            ),
+        ]),
+        "thesis" => Ok(vec![
+            (
+                "main.tex",
+                r"\documentclass[12pt,oneside]{report}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\title{Título de la tesis}
+\author{Nombre del autor}
+\date{\today}
+
+\begin{document}
+\pagenumbering{roman}
+\maketitle
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\chapter{Introducción}
+\input{chapters/introduction}
+
+\chapter{Conclusiones}
+
+\end{document}
+",
+            ),
+            (
+                "chapters/introduction.tex",
+                r"\section{Contexto}
+Describe el contexto y la motivación de tu investigación.
+
+\section{Objetivos}
+\begin{itemize}
+  \item Objetivo general
+\end{itemize}
+",
+            ),
+            (
+                "references.bib",
+                r"@book{lamport1994,
+  author    = {Leslie Lamport},
+  title     = {LaTeX: A Document Preparation System},
+  year      = {1994},
+  publisher = {Addison-Wesley}
+}
+",
+            ),
+        ]),
+        "beamer" => Ok(vec![
+            (
+                "main.tex",
+                r"\documentclass{beamer}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usetheme{Madrid}
+
+\title{Título de la presentación}
+\author{Nombre del autor}
+\institute{Institución}
+\date{\today}
+
+\begin{document}
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Introducción}
+  \begin{itemize}
+    \item Idea principal
+    \item Segundo punto
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Conclusiones}
+\end{frame}
+\end{document}
+",
+            ),
+            (
+                "references.bib",
+                "% Añade aquí tus referencias bibliográficas.\n",
+            ),
+        ]),
+        "letter" => Ok(vec![(
+            "main.tex",
+            r"\documentclass[12pt]{letter}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage[margin=2.5cm]{geometry}
+
+\signature{Nombre del remitente}
+\address{Dirección\\Ciudad}
+\date{\today}
+
+\begin{document}
+\begin{letter}{Nombre del destinatario\\Dirección}
+\opening{Estimado/a:}
+
+Escribe aquí el contenido de tu carta.
+
+\closing{Atentamente,}
+\end{letter}
+\end{document}
+",
+        )]),
+        _ => Err(AppError::Message(
+            "Plantilla de proyecto no compatible".into(),
+        )),
+    }
+}
+
+#[tauri::command]
+fn create_project_from_template(project_root: String, template: String) -> Result<(), AppError> {
+    let root = canonical_root(&project_root)?;
+    if fs::read_dir(&root)?.next().is_some() {
+        return Err(AppError::Message(
+            "Selecciona una carpeta vacía para crear el proyecto.".into(),
+        ));
+    }
+
+    let files = project_template_files(&template)?;
+    let mut created_files = Vec::new();
+    let result = (|| {
+        if template == "thesis" {
+            let chapters = root.join("chapters");
+            fs::create_dir(&chapters)?;
+        }
+        for (relative, contents) in &files {
+            let destination = root.join(relative);
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&destination)?;
+            created_files.push(destination);
+            file.write_all(contents.as_bytes())?;
+            file.sync_all()?;
+        }
+        save_project_config(
+            root.to_string_lossy().into_owned(),
+            ProjectConfig {
+                main_document: Some("main.tex".into()),
+                ..ProjectConfig::default()
+            },
+        )
+    })();
+
+    if let Err(error) = result {
+        for path in created_files {
+            let _ = fs::remove_file(path);
+        }
+        if template == "thesis" {
+            let _ = fs::remove_dir(root.join("chapters"));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn discover_project(root: String) -> Result<ProjectInfo, AppError> {
     let root = canonical_root(&root)?;
@@ -1985,6 +2191,7 @@ pub fn run() {
             list_engines,
             diagnose_environment,
             open_engine_download,
+            create_project_from_template,
             load_project_config,
             save_project_config,
             discover_project,
@@ -2114,6 +2321,68 @@ mod tests {
                 .contains("releases/latest")
         );
         assert!(engine_download_url("sh").is_err());
+    }
+
+    #[test]
+    fn project_templates_include_a_main_document() {
+        for template in ["article", "thesis", "beamer", "letter"] {
+            let files = project_template_files(template).expect("supported template");
+            assert!(
+                files
+                    .iter()
+                    .any(|(path, content)| *path == "main.tex"
+                        && content.contains("\\documentclass")),
+                "{template} is missing its main document"
+            );
+        }
+        assert!(project_template_files("unknown").is_err());
+    }
+
+    #[test]
+    fn creating_a_template_requires_an_empty_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "latex-workbench-template-{}-{}",
+            std::process::id(),
+            PROJECT_CONFIG_TEMP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir_all(&root).expect("temporary project");
+        let existing = root.join("keep.txt");
+        fs::write(&existing, "preserve").expect("existing file");
+
+        let result =
+            create_project_from_template(root.to_string_lossy().into_owned(), "article".into());
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(&existing).expect("existing file"),
+            "preserve"
+        );
+        assert!(!root.join("main.tex").exists());
+        fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[test]
+    fn creating_an_article_template_writes_sources_and_project_settings() {
+        let root = std::env::temp_dir().join(format!(
+            "latex-workbench-new-article-{}-{}",
+            std::process::id(),
+            PROJECT_CONFIG_TEMP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir_all(&root).expect("temporary project");
+
+        create_project_from_template(root.to_string_lossy().into_owned(), "article".into())
+            .expect("create article");
+
+        assert!(root.join("main.tex").is_file());
+        assert!(root.join("references.bib").is_file());
+        assert_eq!(
+            load_project_config(root.to_string_lossy().into_owned())
+                .expect("project config")
+                .main_document
+                .as_deref(),
+            Some("main.tex")
+        );
+        fs::remove_dir_all(root).expect("remove temporary project");
     }
 
     #[test]

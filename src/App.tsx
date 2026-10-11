@@ -48,6 +48,13 @@ type Engine = {
 };
 
 type BuildProfile = "preview" | "release";
+type ProjectTemplate = "article" | "thesis" | "beamer" | "letter";
+const PROJECT_TEMPLATES: { id: ProjectTemplate; label: string; description: string }[] = [
+  { id: "article", label: "Artículo", description: "Resumen, secciones y bibliografía" },
+  { id: "thesis", label: "Tesis", description: "Capítulos, portada y tabla de contenido" },
+  { id: "beamer", label: "Presentación", description: "Diapositivas con tema Madrid" },
+  { id: "letter", label: "Carta", description: "Remitente, destinatario y cierre" },
+];
 type ProjectConfig = {
   version: number;
   mainDocument: string | null;
@@ -417,11 +424,9 @@ export default function App() {
     }
   }, [activeFile, dirty, project, showNotice]);
 
-  const chooseProject = useCallback(async () => {
-    const selected = await open({ directory: true, multiple: false, title: "Abrir proyecto LaTeX" });
-    if (!selected || Array.isArray(selected)) return;
+  const openProjectAt = useCallback(async (root: string) => {
     try {
-      const info = await invoke<Project>("discover_project", { root: selected });
+      const info = await invoke<Project>("discover_project", { root });
       const config = await invoke<ProjectConfig>("load_project_config", { projectRoot: info.root });
       const documents = config.mainDocument && !info.documents.includes(config.mainDocument)
         ? [...info.documents, config.mainDocument].sort()
@@ -449,6 +454,27 @@ export default function App() {
       showNotice(String(error));
     }
   }, [loadFile, showNotice]);
+
+  const chooseProject = useCallback(async () => {
+    const selected = await open({ directory: true, multiple: false, title: "Abrir proyecto LaTeX" });
+    if (!selected || Array.isArray(selected)) return;
+    await openProjectAt(selected);
+  }, [openProjectAt]);
+
+  const createProjectFromTemplate = useCallback(async (template: ProjectTemplate) => {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Elige una carpeta vacía para el nuevo proyecto",
+    });
+    if (!selected || Array.isArray(selected)) return;
+    try {
+      await invoke("create_project_from_template", { projectRoot: selected, template });
+      await openProjectAt(selected);
+    } catch (error) {
+      showNotice(String(error));
+    }
+  }, [openProjectAt, showNotice]);
 
   const saveProjectSettings = useCallback(async () => {
     if (!project) return;
@@ -886,6 +912,23 @@ export default function App() {
           <button className="primary large" onClick={chooseProject}>
             <Folder size={18} /> Abrir proyecto
           </button>
+          <div className="template-heading">
+            <strong>O empieza con una plantilla</strong>
+            <span>Se creará solo dentro de una carpeta vacía que elijas.</span>
+          </div>
+          <div className="template-grid">
+            {PROJECT_TEMPLATES.map((template, index) => (
+              <button
+                className="template-card"
+                key={template.id}
+                onClick={() => void createProjectFromTemplate(template.id)}
+              >
+                {index % 2 === 0 ? <BookOpen size={17} /> : <FileText size={17} />}
+                <span><b>{template.label}</b><small>{template.description}</small></span>
+                <ChevronRight size={15} />
+              </button>
+            ))}
+          </div>
           <div className="engine-readiness">
             {environmentLoading && <span><LoaderCircle className="spin" size={15} /> Revisando requisitos…</span>}
             {environmentError && <span className="environment-error">{environmentError}</span>}

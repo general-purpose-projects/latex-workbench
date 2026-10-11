@@ -46,6 +46,15 @@ button { cursor: pointer; }
 .primary { background: var(--forest); color: white; }
 .primary.large { padding: 13px 20px; margin-top: 16px; }
 .primary:hover, .compile-button:hover, .clean-compile-button:hover { background: var(--forest-dark); }
+.template-heading { margin-top: 26px; display: flex; flex-direction: column; gap: 4px; }
+.template-heading strong { color: #263a30; font-size: 13px; }
+.template-heading span { color: var(--muted); font-size: 11px; }
+.template-grid { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.template-card { min-width: 0; padding: 11px; display: grid; grid-template-columns: 19px minmax(0, 1fr) 15px; align-items: center; gap: 9px; border: 1px solid #dce5df; border-radius: 9px; color: var(--forest-dark); background: rgba(255,255,255,.72); text-align: left; transition: border-color .12s ease, background .12s ease, transform .12s ease; }
+.template-card:hover { transform: translateY(-1px); border-color: #9bcbb0; background: white; }
+.template-card > span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.template-card b { color: #263a30; font-size: 11px; }
+.template-card small { overflow: hidden; color: #748078; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .engine-readiness { margin-top: 26px; color: var(--muted); font-size: 13px; }
 .engine-readiness span { display: inline-flex; align-items: center; gap: 7px; }
 .engine-readiness .environment-error { color: #9d3030; overflow-wrap: anywhere; }
