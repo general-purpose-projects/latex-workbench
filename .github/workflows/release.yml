@@ -4,8 +4,64 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: read
+
 jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            bubblewrap build-essential curl file libayatana-appindicator3-dev \
+            libssl-dev librsvg2-dev libwebkit2gtk-4.1-dev patchelf
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Verify release tag matches app version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const tagVersion = process.env.RELEASE_TAG.replace(/^v/, "");
+          const packageVersion = require("./package.json").version;
+          const tauriVersion = require("./src-tauri/tauri.conf.json").version;
+          const cargoVersion = readFileSync("src-tauri/Cargo.toml", "utf8").match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+          if (![packageVersion, tauriVersion, cargoVersion].every((version) => version === tagVersion)) {
+            throw new Error(`Release tag ${tagVersion} must match package (${packageVersion}), Tauri (${tauriVersion}), and Cargo (${cargoVersion}) versions`);
+          }
+          NODE
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm build
+      - run: pnpm test
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+      - name: Run Rust tests
+        if: runner.os != 'Windows'
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Compile Rust tests on Windows
+        if: runner.os == 'Windows'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-run
+
   bundle:
+    needs: validate
     strategy:
       fail-fast: false
       matrix:
@@ -43,7 +99,42 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Latex Workbench ${{ github.ref_name }}
-          releaseBody: Consulta el registro de cambios para esta versión.
+          releaseBody: |
+            Instaladores para Windows, macOS y Linux. Consulta los requisitos y limitaciones de cada plataforma en el README.
+
+            Cada paquete incluye un archivo de checksums SHA-256. Esta publicación queda como borrador para revisión manual antes de hacerla pública.
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+      - name: Create SHA-256 checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLATFORM: ${{ runner.os }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node <<'NODE'
+          const { createHash } = require("node:crypto");
+          const { readdirSync, readFileSync, writeFileSync } = require("node:fs");
+          const { basename, join } = require("node:path");
+
+          const root = "src-tauri/target/release/bundle";
+          const extensions = new Set([".dmg", ".deb", ".rpm", ".appimage", ".msi", ".exe"]);
+          const files = [];
+          function visit(directory) {
+            for (const entry of readdirSync(directory, { withFileTypes: true })) {
+              const path = join(directory, entry.name);
+              if (entry.isDirectory()) visit(path);
+              else if (entry.isFile() && extensions.has(entry.name.slice(entry.name.lastIndexOf(".")).toLowerCase())) files.push(path);
+            }
+          }
+          visit(root);
+          if (files.length === 0) throw new Error(`No installable bundles found under ${root}`);
+
+          const lines = files.sort().map((path) => {
+            const digest = createHash("sha256").update(readFileSync(path)).digest("hex");
+            return `${digest}  ${basename(path)}`;
+          });
+          writeFileSync(`SHA256SUMS-${process.env.PLATFORM}.txt`, `${lines.join("\n")}\n`);
+          NODE
+          gh release upload "$RELEASE_TAG" "SHA256SUMS-$PLATFORM.txt" --clobber

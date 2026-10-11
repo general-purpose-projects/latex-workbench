@@ -269,6 +269,7 @@ export default function App() {
   const [editorZoom, setEditorZoom] = useState(initialEditorZoom);
   const [configSaved, setConfigSaved] = useState(false);
   const liveLogBytesRef = useRef({ text: "", byteLength: 0 });
+  const environmentInitializedRef = useRef(false);
   const logScrollRef = useRef<HTMLDivElement>(null);
   const editorViewRef = useRef<EditorView | null>(null);
   const pendingSourceLocationRef = useRef<SourceLocation | null>(null);
@@ -343,11 +344,14 @@ export default function App() {
       const report = await invoke<EnvironmentReport>("diagnose_environment");
       setEngines(report.engines);
       setEnvironmentChecks(report.checks);
-      setEngine((current) => report.engines.some((item) => item.id === current && item.available)
-        ? current
-        : (report.engines.find((item) => item.id === "lualatex" && item.available)
-          ?? report.engines.find((item) => item.available)
-          ?? { id: current }).id);
+      if (!environmentInitializedRef.current) {
+        environmentInitializedRef.current = true;
+        setEngine((current) => report.engines.some((item) => item.id === current && item.available)
+          ? current
+          : (report.engines.find((item) => item.id === "lualatex" && item.available)
+            ?? report.engines.find((item) => item.available)
+            ?? { id: current }).id);
+      }
     } catch (error) {
       setEnvironmentError(String(error));
     } finally {
@@ -688,7 +692,6 @@ export default function App() {
       return;
     }
     if (!confirmedFirstCompile && window.localStorage.getItem("latex-workbench.first-compile-notice") !== "shown") {
-      window.localStorage.setItem("latex-workbench.first-compile-notice", "shown");
       setPendingCleanCompile(cleanCache);
       setEngineSetupOpen(true);
       return;
@@ -1286,6 +1289,14 @@ export default function App() {
                 </button>
               ))}
             </div>
+            <button
+              className="setup-modal-refresh"
+              onClick={() => void refreshEnvironment()}
+              disabled={environmentLoading}
+            >
+              <RefreshCw className={environmentLoading ? "spin" : ""} size={14} />
+              Ya lo instalé: volver a comprobar
+            </button>
             {!sandboxReady && <p className="setup-modal-warning">{sandboxCheck?.instructions ?? "Falta el aislamiento necesario para compilar."}</p>}
             <div className="setup-modal-actions">
               <button className="secondary" onClick={() => setEngineSetupOpen(false)}>Ahora no</button>
@@ -1293,6 +1304,7 @@ export default function App() {
                 className="primary"
                 onClick={() => {
                   setEngineSetupOpen(false);
+                  window.localStorage.setItem("latex-workbench.first-compile-notice", "shown");
                   void compile(pendingCleanCompile, true);
                 }}
               >

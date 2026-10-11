@@ -68,6 +68,8 @@ Para crear los instaladores de producción para la plataforma actual:
 pnpm tauri build
 ```
 
+Al publicar una etiqueta `v*`, GitHub Actions valida el proyecto en los tres sistemas operativos, genera los paquetes de instalación y adjunta checksums SHA-256 a un release en borrador. Revisa y publica el borrador manualmente; el flujo actual no firma los instaladores.
+
 El frontend se puede comprobar por separado con:
 
 ```bash
