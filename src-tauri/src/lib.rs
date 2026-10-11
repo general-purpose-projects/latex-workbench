@@ -469,7 +469,7 @@ fn sandbox_runner() -> Option<PathBuf> {
             .arg(true_binary)
             .status()
             .ok()?;
-        return status.success().then_some(runner);
+        status.success().then_some(runner)
     }
     #[cfg(target_os = "macos")]
     {
@@ -486,7 +486,7 @@ fn sandbox_runner() -> Option<PathBuf> {
             ])
             .status()
             .ok()?;
-        return status.success().then_some(runner);
+        status.success().then_some(runner)
     }
     #[cfg(target_os = "windows")]
     {
@@ -572,7 +572,11 @@ fn load_project_config(project_root: String) -> Result<ProjectConfig, AppError> 
             return Err(AppError::InvalidPath(document.clone()));
         }
     }
-    if config.engine.as_deref().is_some_and(|engine| !valid_engine(engine)) {
+    if config
+        .engine
+        .as_deref()
+        .is_some_and(|engine| !valid_engine(engine))
+    {
         return Err(AppError::Message(
             "La configuración contiene un motor LaTeX no compatible".into(),
         ));
@@ -594,7 +598,11 @@ fn save_project_config(project_root: String, config: ProjectConfig) -> Result<()
             return Err(AppError::InvalidPath(document.clone()));
         }
     }
-    if config.engine.as_deref().is_some_and(|engine| !valid_engine(engine)) {
+    if config
+        .engine
+        .as_deref()
+        .is_some_and(|engine| !valid_engine(engine))
+    {
         return Err(AppError::Message(
             "El motor LaTeX seleccionado no es compatible".into(),
         ));
@@ -1243,18 +1251,24 @@ fn sandboxed_command(
             program.to_string_lossy().into_owned(),
         ]);
         sandbox_args.extend_from_slice(args);
-        return Ok((runner, sandbox_args));
+        Ok((runner, sandbox_args))
     }
     #[cfg(target_os = "macos")]
     {
-        let project_path = root.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
-        let output_path = output_dir.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+        let project_path = root
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let output_path = output_dir
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
         let profile = format!(
             "(version 1) (deny default) (allow process*) (allow file-read* (subpath \"{project_path}\") (subpath \"{output_path}\") (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library/TeX\") (subpath \"/Library/Developer\") (subpath \"/Library/Fonts\") (subpath \"/opt\") (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/etc\") (subpath \"/private/etc\") (subpath \"/tmp\") (subpath \"/private/tmp\")) (allow file-read-metadata) (allow sysctl-read) (allow mach-lookup) (allow file-write* (subpath \"{output_path}\") (subpath \"/tmp\") (subpath \"/private/tmp\")) (deny network*)"
         );
         let mut sandbox_args = vec!["-p".into(), profile, program.to_string_lossy().into_owned()];
         sandbox_args.extend_from_slice(args);
-        return Ok((runner, sandbox_args));
+        Ok((runner, sandbox_args))
     }
     #[cfg(target_os = "windows")]
     {
@@ -1402,7 +1416,13 @@ where
                 aggregate[previous_length..].to_string()
             };
             if !emitted.is_empty() {
-                let _ = app.emit("build-log", BuildLogChunk { data: emitted, stream });
+                let _ = app.emit(
+                    "build-log",
+                    BuildLogChunk {
+                        data: emitted,
+                        stream,
+                    },
+                );
             }
         }
     }
@@ -1433,12 +1453,7 @@ async fn run_build_command(
         emitted_log.clone(),
         "stdout",
     ));
-    let stderr_task = tokio::spawn(stream_build_output(
-        stderr,
-        app,
-        emitted_log,
-        "stderr",
-    ));
+    let stderr_task = tokio::spawn(stream_build_output(stderr, app, emitted_log, "stderr"));
 
     let process = async move {
         let status = child.wait().await?;
@@ -1719,7 +1734,9 @@ fn export_sources(project_root: String, destination: String) -> Result<(), AppEr
         .build();
     for entry in walker.skip(1) {
         let entry = entry.map_err(|error| {
-            AppError::Message(format!("No se pudieron exportar todas las fuentes: {error}"))
+            AppError::Message(format!(
+                "No se pudieron exportar todas las fuentes: {error}"
+            ))
         })?;
         let path = entry.path();
         if fs::symlink_metadata(path)?.file_type().is_symlink() {
@@ -1998,7 +2015,10 @@ mod tests {
 
     #[tokio::test]
     async fn inverse_search_resolves_a_compiled_pdf_position() {
-        if find_executable("lualatex").is_none() || find_executable("synctex").is_none() {
+        if sandbox_runner().is_none()
+            || find_executable("lualatex").is_none()
+            || find_executable("synctex").is_none()
+        {
             return;
         }
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2053,7 +2073,10 @@ mod tests {
         };
         let project_root = root.to_string_lossy().into_owned();
         save_project_config(project_root.clone(), config.clone()).expect("save config");
-        assert_eq!(load_project_config(project_root.clone()).expect("load config"), config);
+        assert_eq!(
+            load_project_config(project_root.clone()).expect("load config"),
+            config
+        );
 
         let invalid = ProjectConfig {
             engine: Some("sh".into()),
@@ -2100,7 +2123,10 @@ mod tests {
 
         replace_cache_file(&metadata, b"safe metadata").expect("replace metadata");
 
-        assert_eq!(fs::read(&target).expect("external file contents"), b"unchanged");
+        assert_eq!(
+            fs::read(&target).expect("external file contents"),
+            b"unchanged"
+        );
         assert_eq!(
             fs::read(&metadata).expect("new metadata contents"),
             b"safe metadata"
@@ -2142,7 +2168,10 @@ mod tests {
 
     #[test]
     fn complete_build_uses_incremental_latexmk() {
-        if find_executable("lualatex").is_none() || find_executable("latexmk").is_none() {
+        if sandbox_runner().is_none()
+            || find_executable("lualatex").is_none()
+            || find_executable("latexmk").is_none()
+        {
             return;
         }
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2150,8 +2179,7 @@ mod tests {
             .expect("workspace root")
             .join("tests/fixtures/basic");
         let document = root.join("main.tex");
-        let output =
-            profile_build_dir(&root, None, BuildProfile::Preview).expect("preview output");
+        let output = profile_build_dir(&root, None, BuildProfile::Preview).expect("preview output");
         let request = BuildRequest {
             project_root: root.to_string_lossy().into_owned(),
             document: "main.tex".into(),
@@ -2179,7 +2207,10 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn minted_compiles_with_restricted_shell_escape() {
-        if find_executable("lualatex").is_none() || compatible_latexminted_runtime().is_none() {
+        if sandbox_runner().is_none()
+            || find_executable("lualatex").is_none()
+            || compatible_latexminted_runtime().is_none()
+        {
             return;
         }
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2203,7 +2234,8 @@ mod tests {
 
     #[tokio::test]
     async fn build_resolves_autoref_and_apa_bibliography() {
-        if find_executable("lualatex").is_none()
+        if sandbox_runner().is_none()
+            || find_executable("lualatex").is_none()
             || find_executable("latexmk").is_none()
             || find_executable("biber").is_none()
         {
@@ -2227,8 +2259,7 @@ mod tests {
             .expect("references build");
         assert!(result.success, "{}", result.log);
 
-        let output =
-            profile_build_dir(&root, None, BuildProfile::Preview).expect("preview output");
+        let output = profile_build_dir(&root, None, BuildProfile::Preview).expect("preview output");
         let bbl = fs::read_to_string(output.join("main.bbl")).expect("Biber output");
         assert!(bbl.contains("Gamma"));
         let aux = fs::read_to_string(output.join("main.aux")).expect("LaTeX aux output");
@@ -2250,7 +2281,8 @@ mod tests {
 
     #[tokio::test]
     async fn svg_artifacts_stay_inside_the_private_build_directory() {
-        if find_executable("lualatex").is_none()
+        if sandbox_runner().is_none()
+            || find_executable("lualatex").is_none()
             || find_executable("latexmk").is_none()
             || find_executable("inkscape").is_none()
         {
@@ -2288,7 +2320,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_identical_build_uses_the_cache() {
-        if find_executable("lualatex").is_none() {
+        if sandbox_runner().is_none() || find_executable("lualatex").is_none() {
             return;
         }
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
