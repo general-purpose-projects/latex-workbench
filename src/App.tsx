@@ -35,6 +35,7 @@ import {
   X,
 } from "lucide-react";
 import FileTree, { type ProjectFile, type TreeAction } from "./FileTree";
+import { appendBoundedLog, utf8ByteLength } from "./logging";
 import PdfViewer, { type SourceLocation } from "./PdfViewer";
 import TerminalPanel from "./TerminalPanel";
 
@@ -46,12 +47,30 @@ type Engine = {
   version?: string;
 };
 
+type BuildProfile = "preview" | "release";
+type ProjectConfig = {
+  version: number;
+  mainDocument: string | null;
+  engine: string | null;
+  profile: BuildProfile;
+};
+type EnvironmentCheck = {
+  id: string;
+  label: string;
+  available: boolean;
+  required: boolean;
+  instructions: string;
+};
+type EnvironmentReport = { engines: Engine[]; checks: EnvironmentCheck[] };
+
 type Project = {
   root: string;
   name: string;
   files: ProjectFile[];
   documents: string[];
   gitBranch?: string;
+  warnings?: string[];
+  truncated?: boolean;
 };
 
 type Diagnostic = { severity: "error" | "warning"; message: string };
@@ -217,7 +236,11 @@ const overleafHighlightStyle = HighlightStyle.define([
 
 export default function App() {
   const [engines, setEngines] = useState<Engine[]>([]);
+  const [environmentChecks, setEnvironmentChecks] = useState<EnvironmentCheck[]>([]);
+  const [environmentError, setEnvironmentError] = useState<string | null>(null);
+  const [environmentLoading, setEnvironmentLoading] = useState(false);
   const [engine, setEngine] = useState("lualatex");
+  const [profile, setProfile] = useState<BuildProfile>("preview");
   const [project, setProject] = useState<Project | null>(null);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [documentRoot, setDocumentRoot] = useState<string>("");
@@ -242,6 +265,8 @@ export default function App() {
   const [outlineOpen, setOutlineOpen] = useState(true);
   const [cursorLine, setCursorLine] = useState(1);
   const [editorZoom, setEditorZoom] = useState(initialEditorZoom);
+  const [configSaved, setConfigSaved] = useState(false);
+  const liveLogBytesRef = useRef({ text: "", byteLength: 0 });
   const logScrollRef = useRef<HTMLDivElement>(null);
   const editorViewRef = useRef<EditorView | null>(null);
   const pendingSourceLocationRef = useRef<SourceLocation | null>(null);
@@ -252,6 +277,22 @@ export default function App() {
 
   const dirty = content !== savedContent;
   const availableEngines = engines.filter((item) => item.available);
+  const sandboxCheck = environmentChecks.find((item) => item.id === "sandbox");
+  const sandboxReady = Boolean(sandboxCheck?.available);
+  const selectedEngineReady = engine === "latexmk"
+    ? availableEngines.some((item) => item.id === "latexmk")
+      && availableEngines.some((item) => item.id === "pdflatex")
+    : availableEngines.some((item) => item.id === engine);
+  const profileReady = profile !== "release" || engine === "latexmk";
+  const compileDisabled = building || !documentRoot || !sandboxReady || !selectedEngineReady || !profileReady;
+  const compileBlockReason = environmentError
+    ?? (!sandboxReady ? sandboxCheck?.instructions ?? "Revisa los requisitos de aislamiento." : undefined)
+    ?? (!selectedEngineReady
+      ? engine === "latexmk"
+        ? "Latexmk requiere que pdfLaTeX también esté instalado."
+        : "El motor seleccionado no está instalado o no está disponible."
+      : undefined)
+    ?? (!profileReady ? "El perfil Release requiere seleccionar Latexmk." : undefined);
   const currentLog = building ? liveLog : (build?.log ?? "");
   const logEntries = useMemo(() => classifyLog(currentLog), [currentLog]);
   const logCounts = useMemo(() => logEntries.reduce(
@@ -288,14 +329,26 @@ export default function App() {
       }
     }),
   ], [activeFile]);
-  useEffect(() => {
-    invoke<Engine[]>("list_engines").then((items) => {
-      setEngines(items);
-      const preferred = items.find((item) => item.id === "lualatex" && item.available)
-        ?? items.find((item) => item.available);
-      if (preferred) setEngine(preferred.id);
-    });
+  const refreshEnvironment = useCallback(async () => {
+    setEnvironmentLoading(true);
+    setEnvironmentError(null);
+    try {
+      const report = await invoke<EnvironmentReport>("diagnose_environment");
+      setEngines(report.engines);
+      setEnvironmentChecks(report.checks);
+      setEngine((current) => report.engines.some((item) => item.id === current && item.available)
+        ? current
+        : (report.engines.find((item) => item.id === "lualatex" && item.available)
+          ?? report.engines.find((item) => item.available)
+          ?? { id: current }).id);
+    } catch (error) {
+      setEnvironmentError(String(error));
+    } finally {
+      setEnvironmentLoading(false);
+    }
   }, []);
+
+  useEffect(() => { void refreshEnvironment(); }, [refreshEnvironment]);
 
   const showNotice = useCallback((message: string) => {
     setNotice(message);
@@ -350,16 +403,52 @@ export default function App() {
     if (!selected || Array.isArray(selected)) return;
     try {
       const info = await invoke<Project>("discover_project", { root: selected });
-      setProject(info);
+      const config = await invoke<ProjectConfig>("load_project_config", { projectRoot: info.root });
+      const documents = config.mainDocument && !info.documents.includes(config.mainDocument)
+        ? [...info.documents, config.mainDocument].sort()
+        : info.documents;
+      const projectInfo = { ...info, documents };
+      setProject(projectInfo);
       setBuild(null);
       setGitOutput("");
-      const rootDocument = info.documents[0] ?? info.files.find((item) => item.path.endsWith(".tex"))?.path ?? "";
+      const rootDocument = config.mainDocument
+        ?? documents[0]
+        ?? info.files.find((item) => item.path.endsWith(".tex"))?.path
+        ?? "";
       setDocumentRoot(rootDocument);
-      if (rootDocument) await loadFile(rootDocument, info);
+      setProfile(config.profile);
+      if (config.engine) setEngine(config.engine);
+      setConfigSaved(Boolean(config.mainDocument || config.engine || config.profile !== "preview"));
+      if (info.warnings?.length || info.truncated) {
+        showNotice([
+          ...(info.truncated ? ["El árbol alcanzó el límite de 10.000 entradas."] : []),
+          ...(info.warnings ?? []),
+        ].join(" "));
+      }
+      if (rootDocument) await loadFile(rootDocument, projectInfo);
     } catch (error) {
       showNotice(String(error));
     }
   }, [loadFile, showNotice]);
+
+  const saveProjectSettings = useCallback(async () => {
+    if (!project) return;
+    try {
+      await invoke("save_project_config", {
+        projectRoot: project.root,
+        config: {
+          version: 1,
+          mainDocument: documentRoot || null,
+          engine,
+          profile,
+        },
+      });
+      setConfigSaved(true);
+      showNotice("Configuración guardada en .latex-workbench.json");
+    } catch (error) {
+      showNotice(`No se pudo guardar la configuración: ${String(error)}`);
+    }
+  }, [documentRoot, engine, profile, project, showNotice]);
 
   const saveCurrent = useCallback(async () => {
     if (!project || !activeFile) return false;
@@ -453,6 +542,7 @@ export default function App() {
       if (!item) return;
       if (action === "set-main") {
         setDocumentRoot(item.path);
+        setConfigSaved(false);
         setBuild(null);
         showNotice(`Documento principal: ${item.path}`);
         return;
@@ -479,6 +569,7 @@ export default function App() {
         const nextDocument = movedPath(documentRoot, item.path, renamed) ?? "";
         const info = await rediscoverProject();
         setDocumentRoot(nextDocument);
+        if (nextDocument !== documentRoot) setConfigSaved(false);
         setBuild(null);
         if (info && nextActive && pathIsInside(nextActive, renamed)) await loadFile(nextActive, info, true);
         showNotice("Elemento renombrado");
@@ -497,7 +588,10 @@ export default function App() {
           setSavedContent("");
           setAssetUrl(null);
         }
-        if (removedDocument) setDocumentRoot(info?.documents[0] ?? "");
+        if (removedDocument) {
+          setDocumentRoot(info?.documents[0] ?? "");
+          setConfigSaved(false);
+        }
         setBuild(null);
         showNotice("Elemento eliminado");
       }
@@ -557,7 +651,9 @@ export default function App() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void listen<BuildLogChunk>("build-log", (event) => {
-      setLiveLog((current) => current + event.payload.data);
+      const next = appendBoundedLog(liveLogBytesRef.current, event.payload.data);
+      liveLogBytesRef.current = next;
+      setLiveLog(next.text);
     }).then((stop) => { unlisten = stop; });
     return () => unlisten?.();
   }, []);
@@ -573,10 +669,15 @@ export default function App() {
   }, [building, liveLog]);
 
   const compile = useCallback(async (cleanCache = false) => {
-    if (!project || !documentRoot || building) return;
+    if (!project || !documentRoot || compileDisabled) {
+      if (project && compileBlockReason) showNotice(compileBlockReason);
+      return;
+    }
     if (dirty && !(await saveCurrent())) return;
     setBuilding(true);
-    setLiveLog(cleanCache ? "Limpiando caché de compilación…\n" : "Iniciando compilación…\n");
+    const initialLog = cleanCache ? "Limpiando caché de compilación…\n" : "Iniciando compilación…\n";
+    liveLogBytesRef.current = { text: initialLog, byteLength: utf8ByteLength(initialLog) };
+    setLiveLog(initialLog);
     setLogFilter("all");
     setBottomOpen(true);
     setBottomTab("build");
@@ -584,7 +685,9 @@ export default function App() {
       if (cleanCache) {
         await invoke("clear_build_cache", { projectRoot: project.root });
         setBuild(null);
-        setLiveLog("Caché eliminada. Iniciando compilación completa…\n");
+        const cleanLog = "Caché eliminada. Iniciando compilación completa…\n";
+        liveLogBytesRef.current = { text: cleanLog, byteLength: utf8ByteLength(cleanLog) };
+        setLiveLog(cleanLog);
       }
       const result = await invoke<BuildResult>("compile_project", {
         request: {
@@ -592,6 +695,7 @@ export default function App() {
           document: documentRoot,
           engine,
           shellEscape,
+          profile,
         },
       });
       setBuild(result);
@@ -607,7 +711,7 @@ export default function App() {
     } finally {
       setBuilding(false);
     }
-  }, [building, dirty, documentRoot, engine, project, saveCurrent, shellEscape]);
+  }, [building, compileBlockReason, compileDisabled, dirty, documentRoot, engine, profile, project, saveCurrent, shellEscape, showNotice]);
 
   const jumpToOutline = useCallback((item: OutlineItem) => {
     const view = editorViewRef.current;
@@ -681,7 +785,7 @@ export default function App() {
   }, [project]);
 
   const exportCurrentPdf = useCallback(async () => {
-    if (!build?.pdfPath) return;
+    if (!project || !build?.pdfPath) return;
     const defaultPath = await invoke<string>("default_download_path", { fileName: basename(build.pdfPath) });
     const destination = await save({
       title: "Exportar PDF",
@@ -689,9 +793,13 @@ export default function App() {
       filters: [{ name: "PDF", extensions: ["pdf"] }],
     });
     if (!destination) return;
-    await invoke("export_pdf", { source: build.pdfPath, destination });
+    await invoke("export_pdf", {
+      projectRoot: project.root,
+      source: build.pdfPath,
+      destination,
+    });
     showNotice("PDF exportado correctamente");
-  }, [build?.pdfPath, showNotice]);
+  }, [build?.pdfPath, project, showNotice]);
 
   const exportProject = useCallback(async () => {
     if (!project) return;
@@ -752,11 +860,18 @@ export default function App() {
             <Folder size={18} /> Abrir proyecto
           </button>
           <div className="engine-readiness">
-            {engines.length === 0 ? (
-              <span><LoaderCircle className="spin" size={15} /> Detectando compiladores…</span>
-            ) : (
-              <span><Check size={15} /> {availableEngines.length} compiladores disponibles</span>
-            )}
+            {environmentLoading && <span><LoaderCircle className="spin" size={15} /> Revisando requisitos…</span>}
+            {environmentError && <span className="environment-error">{environmentError}</span>}
+            {environmentChecks.map((check) => (
+              <div className={`environment-check ${check.available ? "available" : "unavailable"}`} key={check.id}>
+                {check.available ? <Check size={14} /> : <X size={14} />}
+                <span><b>{check.label}</b>{!check.available && <> — {check.instructions}</>}</span>
+                {!check.required && <small>opcional</small>}
+              </div>
+            ))}
+            <button className="environment-refresh" onClick={() => void refreshEnvironment()} disabled={environmentLoading}>
+              <RefreshCw size={13} /> Volver a comprobar
+            </button>
           </div>
         </section>
       </main>
@@ -772,18 +887,27 @@ export default function App() {
           {project.gitBranch && <small><FolderGit2 size={13} /> {project.gitBranch}</small>}
         </div>
         <div className="toolbar">
-          <select value={documentRoot} onChange={(event) => setDocumentRoot(event.target.value)} title="Documento raíz">
+          <select value={documentRoot} onChange={(event) => { setDocumentRoot(event.target.value); setConfigSaved(false); }} title="Documento raíz">
             {project.documents.map((document) => <option key={document} value={document}>{document}</option>)}
           </select>
-          <select value={engine} onChange={(event) => setEngine(event.target.value)} title="Compilador">
+          <select value={engine} onChange={(event) => { setEngine(event.target.value); setConfigSaved(false); }} title="Compilador">
             {engines.map((item) => (
               <option key={item.id} value={item.id} disabled={!item.available}>
                 {item.label}{item.available ? "" : " · no instalado"}
               </option>
             ))}
           </select>
+          <select value={profile} onChange={(event) => { setProfile(event.target.value as BuildProfile); setConfigSaved(false); }} title="Perfil de compilación">
+            <option value="preview">Vista previa</option>
+            <option value="release">Release</option>
+          </select>
           <div className="compile-actions dropdown">
-            <button className="compile-button" onClick={() => void compile()} disabled={building || !documentRoot}>
+            <button
+              className="compile-button"
+              onClick={() => void compile()}
+              disabled={compileDisabled}
+              title={building ? undefined : compileBlockReason}
+            >
               {building ? <LoaderCircle className="spin" size={16} /> : <Play size={16} fill="currentColor" />}
               {building ? "Compilando" : "Compilar"}
             </button>
@@ -795,12 +919,19 @@ export default function App() {
               <ChevronDown size={15} />
             </button>
             <div className="dropdown-menu compile-menu">
-              <span className="menu-heading">Compilación completa incremental</span>
+              <span className="menu-heading">{profile === "release" ? "Compilación limpia para distribución" : "Vista previa incremental"}</span>
+              <button onClick={() => void saveProjectSettings()}>
+                <Check size={14} /> {configSaved ? "Configuración guardada" : "Guardar configuración del proyecto"}
+              </button>
+              {compileBlockReason && <small className="profile-warning">{compileBlockReason}</small>}
+              <button onClick={() => void refreshEnvironment()} disabled={environmentLoading}>
+                <RefreshCw size={14} /> Revisar requisitos del entorno
+              </button>
               <label className="menu-toggle" title="Permite a LaTeX ejecutar herramientas externas como Inkscape. Úsalo sólo con proyectos de confianza.">
                 <input type="checkbox" checked={shellEscape} onChange={(event) => setShellEscape(event.target.checked)} />
                 <span><b>Permitir herramientas externas</b><small>Para SVG, minted y procesos auxiliares</small></span>
               </label>
-              <button onClick={() => void compile(true)} disabled={building || !documentRoot}>
+              <button onClick={() => void compile(true)} disabled={compileDisabled}>
                 <RefreshCw size={14} /> Limpiar caché y compilar
               </button>
             </div>
@@ -991,10 +1122,10 @@ export default function App() {
               <h2>Tu PDF aparecerá aquí</h2>
               <p>Selecciona un documento raíz y compílalo.</p>
               <div className="pdf-empty-actions">
-                <button className="primary empty-compile" onClick={() => void compile()} disabled={building || !documentRoot}>
+                <button className="primary empty-compile" onClick={() => void compile()} disabled={compileDisabled}>
                   {building ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />} Compilar ahora
                 </button>
-                <button className="secondary" onClick={() => void compile(true)} disabled={building || !documentRoot}>
+                <button className="secondary" onClick={() => void compile(true)} disabled={compileDisabled}>
                   <RefreshCw size={15} /> Limpiar caché y compilar
                 </button>
               </div>

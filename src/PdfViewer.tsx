@@ -24,10 +24,14 @@ function PdfPage({ document, pageNumber, scale, scrollRoot, onInverseSearch }: P
   const [nearViewport, setNearViewport] = useState(pageNumber === 1);
 
   useEffect(() => {
+    if (!nearViewport) {
+      setPage(null);
+      return;
+    }
     let active = true;
     void document.getPage(pageNumber).then((loaded) => active && setPage(loaded));
     return () => { active = false; };
-  }, [document, pageNumber]);
+  }, [document, nearViewport, pageNumber]);
 
   useEffect(() => {
     const element = hostRef.current;
@@ -64,7 +68,11 @@ function PdfPage({ document, pageNumber, scale, scrollRoot, onInverseSearch }: P
       viewport,
       transform: ratio === 1 ? undefined : [ratio, 0, 0, ratio, 0, 0],
     });
-    return () => task.cancel();
+    return () => {
+      task.cancel();
+      canvas.width = 0;
+      canvas.height = 0;
+    };
   }, [nearViewport, page, viewport]);
 
   const width = viewport?.width ?? 612 * scale;
@@ -113,6 +121,7 @@ export default function PdfViewer({ projectRoot, path, version, onSourceLocation
   const [inverseSearching, setInverseSearching] = useState(false);
   const zoomAnchorRef = useRef<{ page: number; progress: number } | null>(null);
   const restoringZoomRef = useRef(false);
+  const pendingPageRef = useRef<number | null>(null);
 
   const attachScrollRoot = useCallback((element: HTMLDivElement | null) => {
     scrollRef.current = element;
@@ -162,30 +171,40 @@ export default function PdfViewer({ projectRoot, path, version, onSourceLocation
     if (zoom === "height") return Math.max(.2, (size.height - 42) / basePage.height);
     return zoom / 100;
   }, [basePage, size, zoom]);
+  const pageStride = basePage.height * scale + 18;
+  const firstRenderedPage = Math.max(1, currentPage - 4);
+  const lastRenderedPage = Math.min(document?.numPages ?? 1, currentPage + 4);
   const zoomLabel = zoom === "width" ? "Ajustar ancho" : zoom === "height" ? "Ajustar alto" : `${zoom}%`;
 
   const updateCurrentPage = useCallback(() => {
     if (restoringZoomRef.current) return;
     const container = scrollRef.current;
     if (!container) return;
-    const top = container.getBoundingClientRect().top + 24;
-    let closest = 1;
-    let distance = Number.POSITIVE_INFINITY;
-    container.querySelectorAll<HTMLElement>("[data-page]").forEach((page) => {
-      const nextDistance = Math.abs(page.getBoundingClientRect().top - top);
-      if (nextDistance < distance) {
-        distance = nextDistance;
-        closest = Number(page.dataset.page);
-      }
-    });
-    setCurrentPage(closest);
-  }, []);
+    const estimatedPage = Math.round(Math.max(0, container.scrollTop - 24) / pageStride) + 1;
+    setCurrentPage(Math.min(estimatedPage, document?.numPages ?? 1));
+  }, [document?.numPages, pageStride]);
 
   const goToPage = (page: number) => {
+    if (!document) return;
     const target = Math.min(Math.max(page, 1), document?.numPages ?? 1);
-    scrollRef.current?.querySelector<HTMLElement>(`[data-page="${target}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const currentElement = scrollRef.current?.querySelector<HTMLElement>(`[data-page="${target}"]`);
+    if (currentElement) {
+      currentElement.scrollIntoView({ behavior: "smooth", block: "start" });
+      setCurrentPage(target);
+      return;
+    }
+    pendingPageRef.current = target;
     setCurrentPage(target);
   };
+
+  useLayoutEffect(() => {
+    const target = pendingPageRef.current;
+    if (!target) return;
+    scrollRef.current
+      ?.querySelector<HTMLElement>(`[data-page="${target}"]`)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    pendingPageRef.current = null;
+  }, [firstRenderedPage, lastRenderedPage]);
 
   const setZoomPreservingPage = useCallback((nextZoom: ZoomMode) => {
     const container = scrollRef.current;
@@ -305,16 +324,30 @@ export default function PdfViewer({ projectRoot, path, version, onSourceLocation
       <div className="pdf-scroll" ref={attachScrollRoot} onScroll={updateCurrentPage}>
         {!document ? <div className="pdf-loading">Cargando PDF…</div> : (
           <div className="pdf-pages">
-            {Array.from({ length: document.numPages }, (_, index) => (
+            {firstRenderedPage > 1 && (
+              <div
+                className="pdf-page-spacer"
+                aria-hidden="true"
+                style={{ height: Math.max(0, (firstRenderedPage - 1) * pageStride - 18) }}
+              />
+            )}
+            {Array.from({ length: lastRenderedPage - firstRenderedPage + 1 }, (_, index) => (
               <PdfPage
-                key={index + 1}
+                key={firstRenderedPage + index}
                 document={document}
-                pageNumber={index + 1}
+                pageNumber={firstRenderedPage + index}
                 scale={scale}
                 scrollRoot={scrollRoot}
                 onInverseSearch={inverseSearch}
               />
             ))}
+            {lastRenderedPage < document.numPages && (
+              <div
+                className="pdf-page-spacer"
+                aria-hidden="true"
+                style={{ height: Math.max(0, (document.numPages - lastRenderedPage) * pageStride - 18) }}
+              />
+            )}
           </div>
         )}
       </div>
