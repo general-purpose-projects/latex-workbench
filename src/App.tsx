@@ -1146,15 +1146,15 @@ export default function App() {
               {engineStatus}
             </span>
             <div className="dropdown engine-downloads">
-              <button className="engine-download-button" title="Descargar motores LaTeX" aria-label="Descargar motores LaTeX">
+              <button className="engine-download-button" title="Instalar motores LaTeX" aria-label="Instalar motores LaTeX">
                 <Download size={14} />
               </button>
               <div className="dropdown-menu engine-download-menu">
-                <span className="menu-heading">Últimas versiones oficiales</span>
+                <span className="menu-heading">Instalación oficial</span>
                 {engines.map((item) => (
                   <button key={item.id} onClick={() => void downloadEngine(item.id)}>
                     <Download size={14} />
-                    <span>{item.label}<small>{item.available ? "Ya está instalado" : "Descargar o instalar"}</small></span>
+                    <span>{item.label}<small>{item.available ? "Ya está instalado" : "Ver guía de instalación"}</small></span>
                   </button>
                 ))}
               </div>

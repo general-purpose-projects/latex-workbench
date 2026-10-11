@@ -50,10 +50,21 @@ La interfaz React se comunica con el backend Rust mediante comandos y eventos de
 - Rust estable instalado con [rustup](https://rustup.rs/).
 - Dependencias de desarrollo nativas de [Tauri 2](https://v2.tauri.app/start/prerequisites/). En macOS se requieren Xcode Command Line Tools; en Windows, Microsoft C++ Build Tools y WebView2; en Linux, las bibliotecas WebKitGTK y AppIndicator correspondientes a tu distribución.
 - Al menos un motor LaTeX compatible instalado y accesible desde `PATH`. LuaLaTeX es el motor seleccionado inicialmente; también se admiten XeLaTeX, pdfLaTeX, Latexmk y Tectonic cuando están instalados.
-- Para compilar, el sistema de aislamiento también debe estar disponible: `bubblewrap` en Linux o `sandbox-exec` en macOS. La compilación permanece bloqueada en Windows hasta que se implemente un sandbox compatible.
+- Para compilar, el sistema de aislamiento debe estar disponible: `bubblewrap` en Linux, `sandbox-exec` en macOS o WSL 2 con `bubblewrap` en Windows.
 
 Instala una distribución TeX que incluya los paquetes requeridos por tus documentos. Por ejemplo, puedes usar MacTeX en macOS, MiKTeX en Windows o TeX Live en Linux. Consulta la guía oficial de [requisitos de Tauri](https://v2.tauri.app/start/prerequisites/) para los detalles y paquetes de tu sistema operativo.
-En la aplicación, el selector de compilador indica si cada motor está instalado y ofrece acceso a sus páginas oficiales de descarga. La primera vez que intentes compilar se explica que la distribución TeX se instala por separado. En Debian o Ubuntu, instala el aislamiento con `sudo apt-get install bubblewrap`. macOS incluye `sandbox-exec`; Windows todavía no admite compilación aislada. Como el sandbox bloquea la red, Tectonic puede necesitar que sus paquetes ya estén disponibles localmente.
+En la aplicación, el selector de compilador indica si cada motor está instalado en el entorno de compilación y ofrece acceso a las guías oficiales de instalación. La primera vez que intentes compilar se explica que la distribución TeX se instala por separado. En Debian o Ubuntu, instala el aislamiento con `sudo apt-get install bubblewrap`. macOS incluye `sandbox-exec`.
+
+En Windows, instala WSL 2 con una distribución Linux (por ejemplo, Ubuntu) y, dentro de ella, instala `bubblewrap` y los motores/paquetes LaTeX que necesites. Por ejemplo, en Ubuntu puedes empezar con `sudo apt update && sudo apt install bubblewrap latexmk texlive-luatex texlive-xetex texlive-latex-recommended texlive-latex-extra`. La app compila con las herramientas Linux de la distribución WSL predeterminada; no utiliza MiKTeX ni TeX Live instalados solo en Windows. WSL debe poder acceder a la carpeta del proyecto y a la caché de la app mediante sus montajes habituales.
+
+Para evitar que procesos del documento puedan iniciar programas Windows mediante la interoperabilidad de WSL, desactívala en `/etc/wsl.conf` de esa distribución añadiendo:
+
+```ini
+[interop]
+enabled=false
+```
+
+Luego ejecuta `wsl --shutdown` en Windows y vuelve a abrir la app. La aplicación solo habilita la compilación si comprueba que esta función está desactivada y que `bubblewrap` puede aislar red y procesos. El sandbox bloquea la red, por lo que Tectonic puede necesitar que sus paquetes ya estén disponibles localmente.
 
 ### Obtener el código y ejecutar
 

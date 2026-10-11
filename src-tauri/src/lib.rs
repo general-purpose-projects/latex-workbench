@@ -28,7 +28,7 @@ const MAX_BUILD_LOG_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CACHE_METADATA_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PROJECT_SNAPSHOTS: usize = 10;
 const BUILD_LOG_TRUNCATED: &str = "\n[Registro truncado: límite de 2 MiB]\n";
-const BUILD_PIPELINE_VERSION: &[u8] = b"4-sandboxed-profile-build";
+const BUILD_PIPELINE_VERSION: &[u8] = b"5-wsl-sandboxed-profile-build";
 const PROJECT_CONFIG_FILE: &str = ".latex-workbench.json";
 static PROJECT_CONFIG_TEMP_ID: AtomicU32 = AtomicU32::new(0);
 
@@ -326,6 +326,94 @@ fn find_executable(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+#[cfg(target_os = "windows")]
+fn wsl_runner() -> Option<PathBuf> {
+    find_executable("wsl.exe")
+}
+
+#[cfg(target_os = "windows")]
+fn run_wsl(arguments: &[&str]) -> Option<std::process::Output> {
+    std::process::Command::new(wsl_runner()?)
+        .args(["--exec"])
+        .args(arguments)
+        .output()
+        .ok()
+}
+
+#[cfg(target_os = "windows")]
+fn wsl_interop_disabled() -> bool {
+    run_wsl(&["sh", "-c", "cat /proc/sys/fs/binfmt_misc/WSLInterop"]).is_some_and(|output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "disabled"
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn wsl2_kernel_present() -> bool {
+    run_wsl(&["sh", "-c", "uname -r"]).is_some_and(|output| {
+        if !output.status.success() {
+            return false;
+        }
+        let release = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+        release.contains("microsoft") && release.contains("wsl2")
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn wsl_executable(name: &str) -> Option<PathBuf> {
+    if !matches!(
+        name,
+        "bwrap" | "latexmk" | "lualatex" | "xelatex" | "pdflatex" | "tectonic"
+    ) {
+        return None;
+    }
+    let shell_command = format!(
+        "set -eu; [ \"$(/usr/bin/id -u)\" -ne 0 ]; candidate=$(command -v {name}); case \"$candidate\" in /usr/*|/bin/*|/sbin/*|/opt/*) ;; *) exit 1 ;; esac; resolved=$(/usr/bin/readlink -f -- \"$candidate\"); case \"$resolved\" in /usr/*|/bin/*|/sbin/*|/opt/*) ;; *) exit 1 ;; esac; [ -x \"$resolved\" ]; [ \"$(/usr/bin/stat -c %u -- \"$resolved\")\" = 0 ]; [ ! -w \"$resolved\" ]; printf '%s\\n' \"$resolved\""
+    );
+    let output = run_wsl(&["sh", "-c", &shell_command])?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!path.is_empty() && path.starts_with('/') && !path.contains(['\n', '\r', '\0']))
+        .then(|| PathBuf::from(path))
+}
+
+#[cfg(target_os = "windows")]
+fn wsl_path(path: &Path) -> Result<String, AppError> {
+    let runner = wsl_runner().ok_or_else(|| {
+        AppError::Message(
+            "No se encontró WSL. Instala WSL 2 con una distribución Linux para compilar.".into(),
+        )
+    })?;
+    let output = std::process::Command::new(runner)
+        .args(["--exec", "wslpath", "-a", "-u"])
+        .arg(path)
+        .output()?;
+    if !output.status.success() {
+        return Err(AppError::Message(format!(
+            "WSL no pudo acceder a la ruta del proyecto: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let converted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !converted.starts_with('/') || converted.contains(['\n', '\r', '\0']) {
+        return Err(AppError::Message(
+            "WSL devolvió una ruta no válida para el sandbox.".into(),
+        ));
+    }
+    Ok(converted)
+}
+
+#[cfg(target_os = "windows")]
+fn build_executable(name: &str) -> Option<PathBuf> {
+    wsl_executable(name)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn build_executable(name: &str) -> Option<PathBuf> {
+    find_executable(name)
+}
+
 fn project_build_dir(root: &Path, app: Option<&tauri::AppHandle>) -> Result<PathBuf, AppError> {
     if let Some(app) = app {
         let mut hasher = Hasher::new();
@@ -436,7 +524,7 @@ fn list_engines() -> Vec<EngineInfo> {
     ];
     let mut engines = Vec::new();
     for (id, label, binary) in definitions {
-        let path = find_executable(binary);
+        let path = build_executable(binary);
         engines.push(EngineInfo {
             id,
             label,
@@ -502,7 +590,48 @@ fn sandbox_runner() -> Option<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
-        None
+        if !wsl2_kernel_present() || !wsl_interop_disabled() {
+            return None;
+        }
+        let runner = wsl_runner()?;
+        let bwrap = wsl_executable("bwrap")?;
+        let status = std::process::Command::new(&runner)
+            .args([
+                "--exec",
+                bwrap.to_str()?,
+                "--die-with-parent",
+                "--new-session",
+                "--unshare-net",
+                "--unshare-pid",
+                "--unshare-ipc",
+                "--unshare-uts",
+                "--ro-bind",
+                "/",
+                "/",
+                "--dev-bind",
+                "/dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--tmpfs",
+                "/tmp",
+                "--tmpfs",
+                "/home",
+                "--tmpfs",
+                "/root",
+                "--tmpfs",
+                "/mnt",
+                "--tmpfs",
+                "/run",
+                "--ro-bind",
+                "/usr/bin/true",
+                "/init",
+                "--",
+                "/usr/bin/true",
+            ])
+            .status()
+            .ok()?;
+        status.success().then_some(runner)
     }
 }
 
@@ -517,8 +646,10 @@ async fn diagnose_environment() -> EnvironmentReport {
         "Instala bubblewrap (bwrap), por ejemplo: sudo apt install bubblewrap."
     } else if cfg!(target_os = "macos") {
         "Se necesita sandbox-exec, incluido en macOS. Actualiza macOS si no está disponible."
+    } else if sandbox_available {
+        "La compilación usa WSL 2 y bubblewrap; asegúrate de que los motores LaTeX estén instalados dentro de esa distribución."
     } else {
-        "El aislamiento de compilación aún no está disponible en Windows; la compilación permanece bloqueada."
+        "Se requiere WSL 2 con bubblewrap y la interoperabilidad WSL→Windows desactivada. Instala también un motor LaTeX dentro de la distribución."
     };
     EnvironmentReport {
         engines,
@@ -556,29 +687,22 @@ fn valid_engine(engine: &str) -> bool {
 }
 
 fn engine_download_url(engine: &str) -> Result<&'static str, AppError> {
-    if engine == "tectonic" {
-        return Ok("https://github.com/tectonic-typesetting/tectonic/releases/latest");
-    }
-    if !matches!(engine, "latexmk" | "lualatex" | "xelatex" | "pdflatex") {
+    if !valid_engine(engine) {
         return Err(AppError::Message("Motor LaTeX no compatible".into()));
     }
     #[cfg(target_os = "windows")]
     {
-        Ok("https://miktex.org/download")
+        Ok("https://learn.microsoft.com/windows/wsl/install")
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "windows"))]
     {
-        Ok("https://www.tug.org/mactex/")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Ok("https://www.tug.org/texlive/acquire-netinstall.html")
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    {
-        Err(AppError::Message(
-            "No hay una página de descarga configurada para este sistema".into(),
-        ))
+        if engine == "tectonic" {
+            Ok("https://github.com/tectonic-typesetting/tectonic/releases/latest")
+        } else if cfg!(target_os = "macos") {
+            Ok("https://www.tug.org/mactex/")
+        } else {
+            Ok("https://www.tug.org/texlive/acquire-netinstall.html")
+        }
     }
 }
 
@@ -1388,7 +1512,7 @@ fn project_fingerprint(
     hasher.update(request.engine.as_bytes());
     hasher.update(request.profile.directory().as_bytes());
     hasher.update(&[request.shell_escape as u8]);
-    if let Some(engine) = find_executable(&request.engine) {
+    if let Some(engine) = build_executable(&request.engine) {
         hasher.update(engine.to_string_lossy().as_bytes());
         if let Ok(metadata) = engine.metadata() {
             hasher.update(&metadata.len().to_le_bytes());
@@ -1417,11 +1541,14 @@ fn save_dependencies(root: &Path, fls_path: &Path, destination: &Path) -> Result
         .lines()
         .filter_map(|line| line.strip_prefix("INPUT "))
     {
-        let raw = Path::new(line);
-        let candidate = if raw.is_absolute() {
-            raw.to_path_buf()
+        let candidate = if let Some(relative) = line.strip_prefix("/workspace/") {
+            root.join(relative)
+        } else if let Some(relative) = line.strip_prefix("/workspace") {
+            root.join(relative.trim_start_matches('/'))
+        } else if Path::new(line).is_absolute() {
+            Path::new(line).to_path_buf()
         } else {
-            root.join(raw)
+            root.join(line)
         };
         let Ok(canonical) = fs::canonicalize(candidate) else {
             continue;
@@ -1438,6 +1565,28 @@ fn save_dependencies(root: &Path, fls_path: &Path, destination: &Path) -> Result
     replace_cache_file(destination, &serde_json::to_vec_pretty(&dependencies)?)
 }
 
+fn build_command_paths(
+    root: &Path,
+    document_path: &Path,
+    output_dir: &Path,
+) -> Result<(PathBuf, PathBuf), AppError> {
+    #[cfg(target_os = "windows")]
+    {
+        let relative_document = document_path
+            .strip_prefix(root)
+            .map_err(|_| AppError::InvalidPath(document_path.to_string_lossy().into_owned()))?;
+        Ok((
+            PathBuf::from("/build"),
+            PathBuf::from("/workspace").join(relative_document),
+        ))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = root;
+        Ok((output_dir.to_path_buf(), document_path.to_path_buf()))
+    }
+}
+
 fn build_command(
     request: &BuildRequest,
     output_dir: &Path,
@@ -1448,10 +1597,10 @@ fn build_command(
             "El perfil Release requiere Latexmk para garantizar una compilación completa.".into(),
         ));
     }
-    let engine_path = find_executable(&request.engine)
+    let engine_path = build_executable(&request.engine)
         .ok_or_else(|| AppError::EngineUnavailable(request.engine.clone()))?;
-    let output = output_dir.to_string_lossy().into_owned();
-    let document = document_path.to_string_lossy().into_owned();
+    let output = output_dir.to_string_lossy().replace('\\', "/");
+    let document = document_path.to_string_lossy().replace('\\', "/");
     let svg_output = output_dir
         .join("svg-inkscape")
         .to_string_lossy()
@@ -1499,7 +1648,7 @@ fn build_command(
     // inputs changed.  It still converges every build completely: references
     // get the required extra TeX passes, and bibliographies run Biber or
     // BibTeX before the final pass whenever their inputs require it.
-    if let Some(latexmk) = find_executable("latexmk") {
+    if let Some(latexmk) = build_executable("latexmk") {
         let mode = match request.engine.as_str() {
             "lualatex" => "-lualatex",
             "xelatex" => "-xelatex",
@@ -1545,7 +1694,7 @@ fn sandboxed_command(
     let runner = sandbox_runner().ok_or_else(|| {
         if cfg!(target_os = "windows") {
             AppError::Message(
-                "El aislamiento de compilación aún no está disponible en Windows; no se ejecutó el documento.".into(),
+                "No hay un sandbox WSL 2 operativo. Instala WSL 2, bubblewrap y un motor LaTeX dentro de tu distribución, y desactiva la interoperabilidad WSL→Windows; no se ejecutó el documento.".into(),
             )
         } else {
             AppError::Message(
@@ -1608,7 +1757,7 @@ fn sandboxed_command(
             "--chdir".into(),
             root.to_string_lossy().into_owned(),
             "--".into(),
-            program.to_string_lossy().into_owned(),
+            program.to_string_lossy().replace('\\', "/"),
         ]);
         sandbox_args.extend_from_slice(args);
         Ok((runner, sandbox_args))
@@ -1632,10 +1781,94 @@ fn sandboxed_command(
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = (runner, program, args, root, output_dir);
-        Err(AppError::Message(
-            "El aislamiento de compilación aún no está disponible en Windows; no se ejecutó el documento.".into(),
-        ))
+        let wsl_root = wsl_path(root)?;
+        let wsl_output = wsl_path(output_dir)?;
+        let bwrap = wsl_executable("bwrap").ok_or_else(|| {
+            AppError::Message(
+                "No se encontró bubblewrap dentro de WSL. Instálalo en tu distribución Linux."
+                    .into(),
+            )
+        })?;
+        let mut sandbox_args = vec![
+            "--exec".into(),
+            bwrap.to_string_lossy().into_owned(),
+            "--die-with-parent".into(),
+            "--new-session".into(),
+            "--unshare-net".into(),
+            "--unshare-pid".into(),
+            "--unshare-ipc".into(),
+            "--unshare-uts".into(),
+            "--ro-bind".into(),
+            "/".into(),
+            "/".into(),
+            "--dev-bind".into(),
+            "/dev".into(),
+            "/dev".into(),
+            "--proc".into(),
+            "/proc".into(),
+            "--tmpfs".into(),
+            "/tmp".into(),
+            "--dir".into(),
+            "/tmp/home".into(),
+            "--dir".into(),
+            "/tmp/cache".into(),
+            "--dir".into(),
+            "/tmp/texmf-var".into(),
+            "--dir".into(),
+            "/tmp/texmf-config".into(),
+            "--tmpfs".into(),
+            "/home".into(),
+            "--tmpfs".into(),
+            "/root".into(),
+            "--dir".into(),
+            "/workspace".into(),
+            "--dir".into(),
+            "/build".into(),
+            "--ro-bind".into(),
+            wsl_root,
+            "/workspace".into(),
+            "--bind".into(),
+            wsl_output,
+            "/build".into(),
+            "--tmpfs".into(),
+            "/mnt".into(),
+            "--tmpfs".into(),
+            "/run".into(),
+            "--ro-bind".into(),
+            "/usr/bin/true".into(),
+            "/init".into(),
+            "--chdir".into(),
+            "/workspace".into(),
+            "--clearenv".into(),
+            "--setenv".into(),
+            "PATH".into(),
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
+            "--setenv".into(),
+            "HOME".into(),
+            "/tmp/home".into(),
+            "--setenv".into(),
+            "TMPDIR".into(),
+            "/tmp".into(),
+            "--setenv".into(),
+            "TMP".into(),
+            "/tmp".into(),
+            "--setenv".into(),
+            "TEMP".into(),
+            "/tmp".into(),
+            "--setenv".into(),
+            "XDG_CACHE_HOME".into(),
+            "/tmp/cache".into(),
+            "--setenv".into(),
+            "TEXMFVAR".into(),
+            "/tmp/texmf-var".into(),
+            "--setenv".into(),
+            "TEXMFCONFIG".into(),
+            "/tmp/texmf-config".into(),
+            "--".into(),
+            program.to_string_lossy().replace('\\', "/"),
+        ];
+        sandbox_args.extend_from_slice(args);
+        Ok((runner, sandbox_args))
     }
 }
 
@@ -1939,7 +2172,9 @@ async fn compile_project_inner(
         });
     }
 
-    let (program, args) = build_command(&request, &output_dir, &document_path)?;
+    let (command_output_dir, command_document_path) =
+        build_command_paths(&root, &document_path, &output_dir)?;
+    let (program, args) = build_command(&request, &command_output_dir, &command_document_path)?;
     let (sandbox, sandbox_args) = sandboxed_command(&program, &args, &root, &output_dir)?;
     let mut command = Command::new(sandbox);
     command.args(sandbox_args).current_dir(&root);
@@ -1961,7 +2196,11 @@ async fn compile_project_inner(
         let final_fingerprint = project_fingerprint(&root, &request, &dependency_path)?;
         replace_cache_file(&fingerprint_path, final_fingerprint.as_bytes())?;
     }
-    let diagnostics = extract_diagnostics(&log, &root);
+    #[cfg(target_os = "windows")]
+    let diagnostic_root = Path::new("/workspace");
+    #[cfg(not(target_os = "windows"))]
+    let diagnostic_root = root.as_path();
+    let diagnostics = extract_diagnostics(&log, diagnostic_root);
     Ok(BuildResult {
         success,
         cached: false,
@@ -2745,6 +2984,37 @@ mod tests {
     }
 
     #[test]
+    fn dependency_cache_maps_wsl_workspace_inputs_to_project_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "latex-workbench-wsl-dependencies-{}-{}",
+            std::process::id(),
+            PROJECT_CONFIG_TEMP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir_all(root.join("chapters")).expect("project directories");
+        let root = fs::canonicalize(root).expect("canonical project path");
+        fs::write(root.join("main.tex"), "main").expect("main source");
+        fs::write(root.join("chapters/intro.tex"), "chapter").expect("chapter source");
+        let fls = root.join("main.fls");
+        let destination = root.join("dependencies.json");
+        fs::write(
+            &fls,
+            "INPUT /workspace/main.tex\nINPUT /workspace/chapters/intro.tex\nINPUT /usr/share/texmf/base.tex\n",
+        )
+        .expect("recorder file");
+
+        save_dependencies(&root, &fls, &destination).expect("save dependencies");
+
+        let dependencies: Vec<String> =
+            serde_json::from_slice(&fs::read(destination).expect("dependency cache"))
+                .expect("dependency JSON");
+        assert_eq!(
+            dependencies,
+            ["chapters/intro.tex".to_string(), "main.tex".to_string()]
+        );
+        fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[test]
     fn diagnostics_separate_errors_and_warnings() {
         let diagnostics = extract_diagnostics(
             "LaTeX Warning: Reference undefined\n./chapters/intro.tex:12: error: Undefined control sequence.\nOutput written",
@@ -2844,6 +3114,13 @@ mod tests {
         assert!(valid_engine("latexmk"));
         assert!(valid_engine("tectonic"));
         assert!(!valid_engine("sh"));
+        #[cfg(target_os = "windows")]
+        assert!(
+            engine_download_url("tectonic")
+                .unwrap()
+                .contains("learn.microsoft.com/windows/wsl")
+        );
+        #[cfg(not(target_os = "windows"))]
         assert!(
             engine_download_url("tectonic")
                 .unwrap()
