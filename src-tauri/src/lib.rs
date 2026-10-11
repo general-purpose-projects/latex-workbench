@@ -342,14 +342,14 @@ fn run_wsl(arguments: &[&str]) -> Option<std::process::Output> {
 
 #[cfg(target_os = "windows")]
 fn wsl_interop_disabled() -> bool {
-    run_wsl(&["sh", "-c", "cat /proc/sys/fs/binfmt_misc/WSLInterop"]).is_some_and(|output| {
+    run_wsl(&["/bin/sh", "-c", "cat /proc/sys/fs/binfmt_misc/WSLInterop"]).is_some_and(|output| {
         output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "disabled"
     })
 }
 
 #[cfg(target_os = "windows")]
 fn wsl2_kernel_present() -> bool {
-    run_wsl(&["sh", "-c", "uname -r"]).is_some_and(|output| {
+    run_wsl(&["/bin/sh", "-c", "uname -r"]).is_some_and(|output| {
         if !output.status.success() {
             return false;
         }
@@ -369,7 +369,7 @@ fn wsl_executable(name: &str) -> Option<PathBuf> {
     let shell_command = format!(
         "set -eu; [ \"$(/usr/bin/id -u)\" -ne 0 ]; candidate=$(command -v {name}); case \"$candidate\" in /usr/*|/bin/*|/sbin/*|/opt/*) ;; *) exit 1 ;; esac; resolved=$(/usr/bin/readlink -f -- \"$candidate\"); case \"$resolved\" in /usr/*|/bin/*|/sbin/*|/opt/*) ;; *) exit 1 ;; esac; [ -x \"$resolved\" ]; [ \"$(/usr/bin/stat -c %u -- \"$resolved\")\" = 0 ]; [ ! -w \"$resolved\" ]; printf '%s\\n' \"$resolved\""
     );
-    let output = run_wsl(&["sh", "-c", &shell_command])?;
+    let output = run_wsl(&["/bin/sh", "-c", &shell_command])?;
     if !output.status.success() {
         return None;
     }
@@ -386,7 +386,7 @@ fn wsl_path(path: &Path) -> Result<String, AppError> {
         )
     })?;
     let output = std::process::Command::new(runner)
-        .args(["--exec", "wslpath", "-a", "-u"])
+        .args(["--exec", "/usr/bin/wslpath", "-a", "-u"])
         .arg(path)
         .output()?;
     if !output.status.success() {
