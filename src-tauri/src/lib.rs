@@ -543,6 +543,58 @@ fn valid_engine(engine: &str) -> bool {
     )
 }
 
+fn engine_download_url(engine: &str) -> Result<&'static str, AppError> {
+    if engine == "tectonic" {
+        return Ok("https://github.com/tectonic-typesetting/tectonic/releases/latest");
+    }
+    if !matches!(engine, "latexmk" | "lualatex" | "xelatex" | "pdflatex") {
+        return Err(AppError::Message("Motor LaTeX no compatible".into()));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Ok("https://miktex.org/download")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Ok("https://www.tug.org/mactex/")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Ok("https://www.tug.org/texlive/acquire-netinstall.html")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        Err(AppError::Message(
+            "No hay una página de descarga configurada para este sistema".into(),
+        ))
+    }
+}
+
+#[tauri::command]
+fn open_engine_download(engine: String) -> Result<(), AppError> {
+    let url = engine_download_url(&engine)?;
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("cmd.exe");
+        command.args(["/C", "start", "", url]);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    command.spawn()?;
+    Ok(())
+}
+
 #[tauri::command]
 fn load_project_config(project_root: String) -> Result<ProjectConfig, AppError> {
     let root = canonical_root(&project_root)?;
@@ -1932,6 +1984,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_engines,
             diagnose_environment,
+            open_engine_download,
             load_project_config,
             save_project_config,
             discover_project,
@@ -2053,7 +2106,14 @@ mod tests {
     fn supported_engine_list_is_explicit() {
         assert!(valid_engine("lualatex"));
         assert!(valid_engine("latexmk"));
+        assert!(valid_engine("tectonic"));
         assert!(!valid_engine("sh"));
+        assert!(
+            engine_download_url("tectonic")
+                .unwrap()
+                .contains("releases/latest")
+        );
+        assert!(engine_download_url("sh").is_err());
     }
 
     #[test]

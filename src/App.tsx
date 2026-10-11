@@ -240,6 +240,8 @@ export default function App() {
   const [environmentError, setEnvironmentError] = useState<string | null>(null);
   const [environmentLoading, setEnvironmentLoading] = useState(false);
   const [engine, setEngine] = useState("lualatex");
+  const [engineSetupOpen, setEngineSetupOpen] = useState(false);
+  const [pendingCleanCompile, setPendingCleanCompile] = useState(false);
   const [profile, setProfile] = useState<BuildProfile>("preview");
   const [project, setProject] = useState<Project | null>(null);
   const [activeFile, setActiveFile] = useState<string | null>(null);
@@ -277,6 +279,7 @@ export default function App() {
 
   const dirty = content !== savedContent;
   const availableEngines = engines.filter((item) => item.available);
+  const selectedEngine = engines.find((item) => item.id === engine);
   const sandboxCheck = environmentChecks.find((item) => item.id === "sandbox");
   const sandboxReady = Boolean(sandboxCheck?.available);
   const selectedEngineReady = engine === "latexmk"
@@ -284,7 +287,11 @@ export default function App() {
       && availableEngines.some((item) => item.id === "pdflatex")
     : availableEngines.some((item) => item.id === engine);
   const profileReady = profile !== "release" || engine === "latexmk";
-  const compileDisabled = building || !documentRoot || !sandboxReady || !selectedEngineReady || !profileReady;
+  const compileDisabled = building || !documentRoot;
+  const engineStatus = engine === "latexmk" && selectedEngine?.available
+    && !availableEngines.some((item) => item.id === "pdflatex")
+    ? "Falta pdfLaTeX"
+    : selectedEngine?.available ? "Instalado" : "No instalado";
   const compileBlockReason = environmentError
     ?? (!sandboxReady ? sandboxCheck?.instructions ?? "Revisa los requisitos de aislamiento." : undefined)
     ?? (!selectedEngineReady
@@ -354,6 +361,14 @@ export default function App() {
     setNotice(message);
     window.setTimeout(() => setNotice(null), 3200);
   }, []);
+
+  const downloadEngine = useCallback(async (engineId: string) => {
+    try {
+      await invoke("open_engine_download", { engine: engineId });
+    } catch (error) {
+      showNotice(`No se pudo abrir la página de descarga: ${String(error)}`);
+    }
+  }, [showNotice]);
 
   const changeEditorZoom = useCallback((delta: number) => {
     setEditorZoom((current) => Math.min(MAX_EDITOR_ZOOM, Math.max(MIN_EDITOR_ZOOM, current + delta)));
@@ -668,9 +683,18 @@ export default function App() {
     logScrollRef.current.scrollTo({ top: logScrollRef.current.scrollHeight });
   }, [building, liveLog]);
 
-  const compile = useCallback(async (cleanCache = false) => {
-    if (!project || !documentRoot || compileDisabled) {
-      if (project && compileBlockReason) showNotice(compileBlockReason);
+  const compile = useCallback(async (cleanCache = false, confirmedFirstCompile = false) => {
+    if (!project || !documentRoot || building) {
+      return;
+    }
+    if (!confirmedFirstCompile && window.localStorage.getItem("latex-workbench.first-compile-notice") !== "shown") {
+      window.localStorage.setItem("latex-workbench.first-compile-notice", "shown");
+      setPendingCleanCompile(cleanCache);
+      setEngineSetupOpen(true);
+      return;
+    }
+    if (compileBlockReason) {
+      showNotice(compileBlockReason);
       return;
     }
     if (dirty && !(await saveCurrent())) return;
@@ -711,7 +735,7 @@ export default function App() {
     } finally {
       setBuilding(false);
     }
-  }, [building, compileBlockReason, compileDisabled, dirty, documentRoot, engine, profile, project, saveCurrent, shellEscape, showNotice]);
+  }, [building, compileBlockReason, dirty, documentRoot, engine, profile, project, saveCurrent, shellEscape, showNotice]);
 
   const jumpToOutline = useCallback((item: OutlineItem) => {
     const view = editorViewRef.current;
@@ -890,13 +914,36 @@ export default function App() {
           <select value={documentRoot} onChange={(event) => { setDocumentRoot(event.target.value); setConfigSaved(false); }} title="Documento raíz">
             {project.documents.map((document) => <option key={document} value={document}>{document}</option>)}
           </select>
-          <select value={engine} onChange={(event) => { setEngine(event.target.value); setConfigSaved(false); }} title="Compilador">
-            {engines.map((item) => (
-              <option key={item.id} value={item.id} disabled={!item.available}>
-                {item.label}{item.available ? "" : " · no instalado"}
-              </option>
-            ))}
-          </select>
+          <div className="engine-control">
+            <select value={engine} onChange={(event) => { setEngine(event.target.value); setConfigSaved(false); }} title="Compilador">
+              {engines.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}{item.available ? " · instalado" : " · no instalado"}
+                </option>
+              ))}
+            </select>
+            <span
+              className={`engine-status ${selectedEngineReady ? "installed" : "missing"}`}
+              title={selectedEngineReady ? `${selectedEngine?.label ?? engine}: instalado` : `${selectedEngine?.label ?? engine}: no instalado`}
+            >
+              {selectedEngineReady ? <Check size={11} /> : <X size={11} />}
+              {engineStatus}
+            </span>
+            <div className="dropdown engine-downloads">
+              <button className="engine-download-button" title="Descargar motores LaTeX" aria-label="Descargar motores LaTeX">
+                <Download size={14} />
+              </button>
+              <div className="dropdown-menu engine-download-menu">
+                <span className="menu-heading">Últimas versiones oficiales</span>
+                {engines.map((item) => (
+                  <button key={item.id} onClick={() => void downloadEngine(item.id)}>
+                    <Download size={14} />
+                    <span>{item.label}<small>{item.available ? "Ya está instalado" : "Descargar o instalar"}</small></span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
           <select value={profile} onChange={(event) => { setProfile(event.target.value as BuildProfile); setConfigSaved(false); }} title="Perfil de compilación">
             <option value="preview">Vista previa</option>
             <option value="release">Release</option>
@@ -1221,6 +1268,40 @@ export default function App() {
         <span><Box size={13} /> {availableEngines.length} motores</span>
       </footer>
 
+      {engineSetupOpen && (
+        <div className="setup-modal-backdrop" role="presentation">
+          <section className="setup-modal" role="dialog" aria-modal="true" aria-labelledby="engine-setup-title">
+            <div className="setup-modal-icon"><Download size={21} /></div>
+            <h2 id="engine-setup-title">Antes de compilar</h2>
+            <p>
+              Latex Workbench no incluye una distribución LaTeX. Usa motores instalados en tu equipo;
+              el motor seleccionado, <b>{selectedEngine?.label ?? engine}</b>, figura como <b>{engineStatus.toLowerCase()}</b>.
+            </p>
+            <p>Si aún no tienes un motor, puedes abrir su página oficial de descarga. Tectonic también está disponible en la lista.</p>
+            <div className="setup-modal-engines">
+              {engines.map((item) => (
+                <button key={item.id} onClick={() => void downloadEngine(item.id)}>
+                  <Download size={14} /> Última versión de {item.label}
+                  <small>{item.available ? "Instalado" : "No instalado"}</small>
+                </button>
+              ))}
+            </div>
+            {!sandboxReady && <p className="setup-modal-warning">{sandboxCheck?.instructions ?? "Falta el aislamiento necesario para compilar."}</p>}
+            <div className="setup-modal-actions">
+              <button className="secondary" onClick={() => setEngineSetupOpen(false)}>Ahora no</button>
+              <button
+                className="primary"
+                onClick={() => {
+                  setEngineSetupOpen(false);
+                  void compile(pendingCleanCompile, true);
+                }}
+              >
+                Continuar
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       {notice && <div className="toast"><Check size={16} /> {notice}</div>}
     </main>
   );

@@ -51,7 +51,7 @@ La interfaz React se comunica con el backend Rust mediante comandos y eventos de
 - Para compilar, el sistema de aislamiento también debe estar disponible: `bubblewrap` en Linux o `sandbox-exec` en macOS. La compilación permanece bloqueada en Windows hasta que se implemente un sandbox compatible.
 
 Instala una distribución TeX que incluya los paquetes requeridos por tus documentos. Por ejemplo, puedes usar MacTeX en macOS, MiKTeX en Windows o TeX Live en Linux. Consulta la guía oficial de [requisitos de Tauri](https://v2.tauri.app/start/prerequisites/) para los detalles y paquetes de tu sistema operativo.
-En Debian o Ubuntu, instala el aislamiento con `sudo apt-get install bubblewrap`. macOS incluye `sandbox-exec`; Windows todavía no admite compilación aislada. Como el sandbox bloquea la red, Tectonic puede necesitar que sus paquetes ya estén disponibles localmente.
+En la aplicación, el selector de compilador indica si cada motor está instalado y ofrece acceso a sus páginas oficiales de descarga. La primera vez que intentes compilar se explica que la distribución TeX se instala por separado. En Debian o Ubuntu, instala el aislamiento con `sudo apt-get install bubblewrap`. macOS incluye `sandbox-exec`; Windows todavía no admite compilación aislada. Como el sandbox bloquea la red, Tectonic puede necesitar que sus paquetes ya estén disponibles localmente.
 
 ### Obtener el código y ejecutar
 
