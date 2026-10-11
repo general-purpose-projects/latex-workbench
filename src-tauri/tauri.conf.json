@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-eval'",
+      "csp": "default-src 'self' asset: http://asset.localhost; connect-src 'self' https://api.crossref.org https://api.openai.com; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-eval'",
       "assetProtocol": {
         "enable": true,
         "scope": ["$HOME/**", "$DOCUMENT/**", "$DOWNLOAD/**"]

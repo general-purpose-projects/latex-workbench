@@ -24,6 +24,7 @@ import {
   FolderGit2,
   Github,
   GitPullRequest,
+  History,
   LoaderCircle,
   Minus,
   PanelBottom,
@@ -36,6 +37,8 @@ import {
 } from "lucide-react";
 import FileTree, { type ProjectFile, type TreeAction } from "./FileTree";
 import { appendBoundedLog, utf8ByteLength } from "./logging";
+import { validateBibliography } from "./bibliography";
+import { crossrefToBibtex, normalizeDoi, type CrossrefWork } from "./crossref";
 import PdfViewer, { type SourceLocation } from "./PdfViewer";
 import TerminalPanel from "./TerminalPanel";
 
@@ -48,12 +51,14 @@ type Engine = {
 };
 
 type BuildProfile = "preview" | "release";
-type ProjectTemplate = "article" | "thesis" | "beamer" | "letter";
+type ProjectTemplate = "article" | "thesis" | "beamer" | "letter" | "ieee" | "acm";
 const PROJECT_TEMPLATES: { id: ProjectTemplate; label: string; description: string }[] = [
   { id: "article", label: "Artículo", description: "Resumen, secciones y bibliografía" },
   { id: "thesis", label: "Tesis", description: "Capítulos, portada y tabla de contenido" },
   { id: "beamer", label: "Presentación", description: "Diapositivas con tema Madrid" },
   { id: "letter", label: "Carta", description: "Remitente, destinatario y cierre" },
+  { id: "ieee", label: "Artículo IEEE", description: "Dos columnas; requiere IEEEtran" },
+  { id: "acm", label: "Artículo ACM", description: "Formato sigconf; requiere acmart" },
 ];
 type ProjectConfig = {
   version: number;
@@ -80,7 +85,7 @@ type Project = {
   truncated?: boolean;
 };
 
-type Diagnostic = { severity: "error" | "warning"; message: string };
+type Diagnostic = { severity: "error" | "warning"; message: string; file?: string; line?: number };
 
 type BuildResult = {
   success: boolean;
@@ -90,6 +95,7 @@ type BuildResult = {
   log: string;
   diagnostics: Diagnostic[];
 };
+type ProjectSnapshot = { id: string; fileCount: number };
 
 type BuildLogChunk = { data: string; stream: "stdout" | "stderr" };
 type LogLevel = "error" | "warning" | "info";
@@ -264,6 +270,20 @@ export default function App() {
   const [shellEscape, setShellEscape] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [gitOutput, setGitOutput] = useState("");
+  const [gitDiff, setGitDiff] = useState("");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [snapshots, setSnapshots] = useState<ProjectSnapshot[]>([]);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [doi, setDoi] = useState("");
+  const [doiWork, setDoiWork] = useState<CrossrefWork | null>(null);
+  const [doiLoading, setDoiLoading] = useState(false);
+  const [doiError, setDoiError] = useState<string | null>(null);
+  const [aiDiagnostic, setAiDiagnostic] = useState<string | null>(null);
+  const [aiKey, setAiKey] = useState("");
+  const [aiModel, setAiModel] = useState("");
+  const [aiExplanation, setAiExplanation] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(225);
   const [editorWidth, setEditorWidth] = useState(600);
   const [bottomHeight, setBottomHeight] = useState(220);
@@ -318,6 +338,10 @@ export default function App() {
     ? logEntries
     : logEntries.filter((entry) => entry.level === logFilter);
   const outline = useMemo(() => parseOutline(content), [content]);
+  const bibliographyIssues = useMemo(
+    () => activeFile?.toLowerCase().endsWith(".bib") ? validateBibliography(content) : [],
+    [activeFile, content],
+  );
   const activeOutlineLine = useMemo(() => {
     let active: number | null = null;
     for (const item of outline) {
@@ -367,6 +391,20 @@ export default function App() {
   }, []);
 
   useEffect(() => { void refreshEnvironment(); }, [refreshEnvironment]);
+
+  useEffect(() => {
+    if (!engineSetupOpen && !historyOpen && !aiDiagnostic) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setEngineSetupOpen(false);
+      setHistoryOpen(false);
+      setAiDiagnostic(null);
+      setAiKey("");
+      setAiExplanation("");
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [aiDiagnostic, engineSetupOpen, historyOpen]);
 
   const showNotice = useCallback((message: string) => {
     setNotice(message);
@@ -435,6 +473,7 @@ export default function App() {
       setProject(projectInfo);
       setBuild(null);
       setGitOutput("");
+      setGitDiff("");
       const rootDocument = config.mainDocument
         ?? documents[0]
         ?? info.files.find((item) => item.path.endsWith(".tex"))?.path
@@ -810,7 +849,9 @@ export default function App() {
   }, [activeFile, dirty, loadFile, project, revealSourceLocation, saveCurrent, showNotice]);
 
   const copyLogs = useCallback(async () => {
-    const value = building ? liveLog : (build?.log ?? gitOutput);
+    const value = building ? liveLog : gitOutput
+      ? `${gitOutput}${gitDiff ? `\n\n${gitDiff}` : ""}`
+      : (build?.log ?? "");
     if (!value.trim()) return;
     try {
       await writeText(value);
@@ -818,20 +859,100 @@ export default function App() {
     } catch (error) {
       showNotice(`No se pudieron copiar los logs: ${String(error)}`);
     }
-  }, [build?.log, building, gitOutput, liveLog, showNotice]);
+  }, [build?.log, building, gitDiff, gitOutput, liveLog, showNotice]);
 
-  const runGit = useCallback(async (action: "status" | "fetch" | "pull" | "push") => {
-    if (!project) return;
+  const lookupDoi = useCallback(async () => {
+    const normalized = normalizeDoi(doi);
+    if (!/^10\.\d{4,9}\/\S+$/i.test(normalized)) {
+      setDoiError("Escribe un DOI válido, por ejemplo 10.1000/xyz123.");
+      setDoiWork(null);
+      return;
+    }
+    setDoiLoading(true);
+    setDoiError(null);
+    setDoiWork(null);
     try {
-      const result = await invoke<{ success: boolean; output: string }>("git_action", {
+      const response = await fetch(`https://api.crossref.org/works/${encodeURIComponent(normalized)}`, {
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) throw new Error(response.status === 404 ? "Crossref no encontró ese DOI." : `Crossref respondió ${response.status}.`);
+      const payload = await response.json() as { message?: CrossrefWork };
+      if (!payload.message?.DOI) throw new Error("La respuesta no contiene metadatos bibliográficos.");
+      setDoiWork(payload.message);
+    } catch (error) {
+      setDoiError(`No se pudo consultar Crossref: ${String(error)}`);
+    } finally {
+      setDoiLoading(false);
+    }
+  }, [doi]);
+
+  const addDoiReference = useCallback(() => {
+    if (!doiWork) return;
+    const entry = crossrefToBibtex(doiWork);
+    const separator = content.trim() ? (content.trimEnd().endsWith("}") ? "\n\n" : "\n") : "";
+    setContent(`${content}${separator}${entry}\n`);
+    setDoiWork(null);
+    setDoi("");
+    showNotice("Referencia añadida al borrador. Guarda el archivo para conservarla.");
+  }, [content, doiWork, showNotice]);
+
+  const explainDiagnosticWithAi = useCallback(async () => {
+    if (!aiDiagnostic || !aiKey.trim() || !aiModel.trim()) return;
+    setAiLoading(true);
+    setAiError(null);
+    setAiExplanation("");
+    try {
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${aiKey.trim()}`,
+        },
+        body: JSON.stringify({
+          model: aiModel.trim(),
+          messages: [
+            { role: "system", content: "Explica errores de compilación LaTeX en español claro. Da causa probable, pasos concretos de diagnóstico y una corrección mínima. No inventes el contenido de archivos no proporcionados." },
+            { role: "user", content: `Explica este único diagnóstico de compilación:\n${aiDiagnostic}` },
+          ],
+          temperature: 0.2,
+        }),
+      });
+      const payload = await response.json() as {
+        choices?: { message?: { content?: string } }[];
+        error?: { message?: string };
+      };
+      if (!response.ok) throw new Error(payload.error?.message ?? `OpenAI respondió ${response.status}.`);
+      const explanation = payload.choices?.[0]?.message?.content?.trim();
+      if (!explanation) throw new Error("La respuesta no incluyó una explicación.");
+      setAiExplanation(explanation);
+    } catch (error) {
+      setAiError(`No se pudo obtener la explicación: ${String(error)}`);
+    } finally {
+      setAiLoading(false);
+    }
+  }, [aiDiagnostic, aiKey, aiModel]);
+
+  const runGit = useCallback(async (action: "status" | "changes" | "fetch" | "pull" | "push") => {
+    if (!project) return;
+    if (action === "pull" && !window.confirm("Se descargarán cambios remotos. ¿Continuar?")) return;
+    if (action === "push" && !window.confirm("Se publicarán los commits locales en el remoto. ¿Continuar?")) return;
+    try {
+      const result = await invoke<{ success: boolean; output: string; status?: string; diff?: string }>("git_action", {
         projectRoot: project.root,
         action,
       });
-      setGitOutput(result.output || (result.success ? `Git ${action}: completado` : `Git ${action}: falló`));
+      if (action === "changes") {
+        setGitOutput(result.status || (result.success ? "Sin cambios Git." : "No se pudo consultar el estado Git."));
+        setGitDiff(result.diff || "");
+      } else {
+        setGitOutput(result.output || (result.success ? `Git ${action}: completado` : `Git ${action}: falló`));
+        setGitDiff("");
+      }
       setBottomOpen(true);
       setBottomTab("build");
     } catch (error) {
       setGitOutput(String(error));
+      setGitDiff("");
       setBottomOpen(true);
       setBottomTab("build");
     }
@@ -872,6 +993,55 @@ export default function App() {
     setBottomTab("terminal");
     setBottomOpen(true);
   }, []);
+
+  const refreshSnapshots = useCallback(async () => {
+    if (!project) return;
+    setSnapshotLoading(true);
+    try {
+      const items = await invoke<ProjectSnapshot[]>("list_project_snapshots", { projectRoot: project.root });
+      setSnapshots(items);
+    } catch (error) {
+      showNotice(`No se pudo consultar el historial local: ${String(error)}`);
+    } finally {
+      setSnapshotLoading(false);
+    }
+  }, [project, showNotice]);
+
+  const saveSnapshot = useCallback(async () => {
+    if (!project) return;
+    if (dirty && !(await saveCurrent())) return;
+    setSnapshotLoading(true);
+    try {
+      await invoke<ProjectSnapshot>("create_project_snapshot_command", { projectRoot: project.root });
+      await refreshSnapshots();
+      showNotice("Punto de restauración local guardado");
+    } catch (error) {
+      showNotice(`No se pudo guardar el punto de restauración: ${String(error)}`);
+    } finally {
+      setSnapshotLoading(false);
+    }
+  }, [dirty, project, refreshSnapshots, saveCurrent, showNotice]);
+
+  const restoreSnapshot = useCallback(async (snapshot: ProjectSnapshot) => {
+    if (!project) return;
+    if (dirty && !(await saveCurrent())) return;
+    const timestamp = new Date(Number(snapshot.id) / 1_000_000).toLocaleString();
+    if (!window.confirm(`Restaurar los ${snapshot.fileCount} archivos del punto ${timestamp}? Los archivos correspondientes se sobrescribirán; los archivos creados después no se eliminarán.`)) return;
+    setSnapshotLoading(true);
+    try {
+      await invoke<ProjectSnapshot>("restore_project_snapshot", {
+        projectRoot: project.root,
+        snapshotId: snapshot.id,
+      });
+      await openProjectAt(project.root);
+      await refreshSnapshots();
+      showNotice("Punto de restauración aplicado");
+    } catch (error) {
+      showNotice(`No se pudo restaurar el punto: ${String(error)}`);
+    } finally {
+      setSnapshotLoading(false);
+    }
+  }, [dirty, openProjectAt, project, refreshSnapshots, saveCurrent, showNotice]);
 
   const beginResize = useCallback((kind: "sidebar" | "editor" | "bottom", event: React.PointerEvent) => {
     event.preventDefault();
@@ -1037,9 +1207,11 @@ export default function App() {
             </div>
           </div>
           <div className="dropdown">
-            <button className="icon-button"><Github size={18} /><ChevronDown size={13} /></button>
+            <button className="icon-button" title="Acciones de Git" aria-label="Acciones de Git"><Github size={18} /><ChevronDown size={13} /></button>
             <div className="dropdown-menu right">
               <button onClick={() => runGit("status")}><GitPullRequest size={15} /> Estado</button>
+              <button onClick={() => runGit("changes")}><Code2 size={15} /> Revisar cambios</button>
+              <button onClick={() => { setHistoryOpen(true); void refreshSnapshots(); }}><History size={15} /> Historial local</button>
               <button onClick={() => runGit("fetch")}><RefreshCw size={15} /> Fetch</button>
               <button onClick={() => runGit("pull")}><Download size={15} /> Pull</button>
               <button onClick={() => runGit("push")}><Upload size={15} /> Push</button>
@@ -1156,31 +1328,83 @@ export default function App() {
               <span>{activeFile}</span>
             </div>
           ) : activeFile && isEditable(activeFile) ? (
-            <CodeMirror
-              key={activeFile}
-              className="editor-codemirror"
-              style={{ "--editor-font-size": `${13 * editorZoom / 100}px` } as CSSProperties}
-              value={content}
-              height="100%"
-              extensions={editorExtensions}
-              onCreateEditor={(view) => {
-                editorViewRef.current = view;
-                const pending = pendingSourceLocationRef.current;
-                if (pending && pending.path === activeFile) {
-                  window.requestAnimationFrame(() => revealSourceLocation(view, pending));
-                  pendingSourceLocationRef.current = null;
-                }
-              }}
-              onChange={setContent}
-              theme="light"
-              basicSetup={{
-                lineNumbers: true,
-                foldGutter: true,
-                highlightActiveLine: true,
-                bracketMatching: true,
-                autocompletion: true,
-              }}
-            />
+            <>
+              {activeFile.toLowerCase().endsWith(".bib") && (
+                <details className={`bibliography-check ${bibliographyIssues.some((item) => item.severity === "error") ? "has-errors" : bibliographyIssues.length ? "has-warnings" : "is-valid"}`}>
+                  <summary>
+                    <BookOpen size={14} />
+                    {bibliographyIssues.length
+                      ? `Bibliografía: ${bibliographyIssues.filter((item) => item.severity === "error").length} errores, ${bibliographyIssues.filter((item) => item.severity === "warning").length} avisos`
+                      : "Bibliografía: sin problemas básicos detectados"}
+                  </summary>
+                  {bibliographyIssues.length > 0 && (
+                    <ul>
+                      {bibliographyIssues.map((issue, index) => (
+                        <li key={`${issue.line}-${index}`} className={issue.severity}>
+                          <button onClick={() => {
+                            const view = editorViewRef.current;
+                            if (!view) return;
+                            const line = view.state.doc.line(Math.min(issue.line, view.state.doc.lines));
+                            view.dispatch({ selection: { anchor: line.from }, effects: EditorView.scrollIntoView(line.from, { y: "center" }) });
+                            view.focus();
+                          }}>
+                            Línea {issue.line}: {issue.message}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <div className="doi-import">
+                    <label htmlFor="doi-reference">Importar por DOI (consulta Crossref al solicitarla)</label>
+                    <div>
+                      <input
+                        id="doi-reference"
+                        value={doi}
+                        onChange={(event) => { setDoi(event.target.value); setDoiError(null); setDoiWork(null); }}
+                        placeholder="10.1000/xyz123"
+                        onKeyDown={(event) => { if (event.key === "Enter") void lookupDoi(); }}
+                      />
+                      <button onClick={() => void lookupDoi()} disabled={doiLoading || !doi.trim()}>
+                        {doiLoading ? "Buscando…" : "Buscar"}
+                      </button>
+                    </div>
+                    <small>Solo se envía el DOI a Crossref; el contenido del documento no se transmite.</small>
+                    {doiError && <p role="alert">{doiError}</p>}
+                    {doiWork && (
+                      <div className="doi-result">
+                        <span>{doiWork.title?.[0] ?? doiWork.DOI}</span>
+                        <button onClick={addDoiReference}>Añadir al .bib</button>
+                      </div>
+                    )}
+                  </div>
+                </details>
+              )}
+              <CodeMirror
+                key={activeFile}
+                className="editor-codemirror"
+                style={{ "--editor-font-size": `${13 * editorZoom / 100}px` } as CSSProperties}
+                value={content}
+                height="100%"
+                extensions={editorExtensions}
+                onCreateEditor={(view) => {
+                  editorViewRef.current = view;
+                  const pending = pendingSourceLocationRef.current;
+                  if (pending && pending.path === activeFile) {
+                    window.requestAnimationFrame(() => revealSourceLocation(view, pending));
+                    pendingSourceLocationRef.current = null;
+                  }
+                }}
+                onChange={setContent}
+                theme="light"
+                basicSetup={{
+                  lineNumbers: true,
+                  foldGutter: true,
+                  highlightActiveLine: true,
+                  bracketMatching: true,
+                  autocompletion: true,
+                }}
+              />
+            </>
           ) : <div className="empty-pane">Selecciona un archivo de texto o una imagen</div>}
         </section>
 
@@ -1251,30 +1475,62 @@ export default function App() {
                   </button>
                 </div>
                 <div className="bottom-actions">
-                  <button onClick={copyLogs} title="Copiar logs" disabled={!(building ? liveLog : (build?.log ?? gitOutput))}>
+                  <button onClick={copyLogs} title="Copiar logs o diff Git" disabled={!(building ? liveLog : (gitOutput || build?.log || gitDiff))}>
                     <Copy size={14} /> Copiar logs
                   </button>
                   <button className="bottom-close" onClick={() => setBottomOpen(false)} title="Cerrar panel"><X size={15} /></button>
                 </div>
               </div>
               {bottomTab === "build" && (
-                <div className="log-filters" role="toolbar" aria-label="Filtrar registro de compilación">
-                  {([
-                    ["all", "Todos", logEntries.length],
-                    ["error", "Errores", logCounts.error],
-                    ["warning", "Advertencias", logCounts.warning],
-                    ["info", "Info", logCounts.info],
-                  ] as const).map(([filter, label, count]) => (
-                    <button
-                      key={filter}
-                      className={`${filter} ${logFilter === filter ? "active" : ""}`}
-                      onClick={() => setLogFilter(filter)}
-                      aria-pressed={logFilter === filter}
-                    >
-                      {label} <span>{count}</span>
-                    </button>
-                  ))}
-                </div>
+                <>
+                  {build?.diagnostics.length ? (
+                    <details className="build-diagnostics" open>
+                      <summary>
+                        Diagnósticos: {build.diagnostics.filter((item) => item.severity === "error").length} errores,{" "}
+                        {build.diagnostics.filter((item) => item.severity === "warning").length} avisos
+                      </summary>
+                      <ul>
+                        {build.diagnostics.map((item, index) => (
+                          <li key={`${item.line ?? 0}-${index}`} className={item.severity}>
+                            <span>
+                              {item.file && item.line ? (
+                                <button onClick={() => void openSourceLocation({
+                                  path: item.file!,
+                                  line: item.line!,
+                                  column: 0,
+                                })}>
+                                  {item.file}:{item.line} — {item.message}
+                                </button>
+                              ) : item.message}
+                            </span>
+                            <button className="ai-explain-trigger" onClick={() => {
+                              setAiDiagnostic(item.message);
+                              setAiError(null);
+                              setAiExplanation("");
+                            }}>Explicar con IA</button>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  ) : null}
+                  <div className="log-filters" role="toolbar" aria-label="Filtrar registro de compilación">
+                    {([
+                      ["all", "Todos", logEntries.length],
+                      ["error", "Errores", logCounts.error],
+                      ["warning", "Advertencias", logCounts.warning],
+                      ["info", "Info", logCounts.info],
+                    ] as const).map(([filter, label, count]) => (
+                      <button
+                        key={filter}
+                        className={`${filter} ${logFilter === filter ? "active" : ""}`}
+                        onClick={() => setLogFilter(filter)}
+                        aria-pressed={logFilter === filter}
+                      >
+                        {label} <span>{count}</span>
+                      </button>
+                    ))}
+                  </div>
+                </>
               )}
               <div
                 ref={logScrollRef}
@@ -1283,6 +1539,12 @@ export default function App() {
                 aria-label="Registro de compilación"
               >
                 {gitOutput && <pre className="git-output"><Github size={14} /> {gitOutput}</pre>}
+                {gitDiff && (
+                  <div className="git-diff-container">
+                    <small>Diff de archivos versionados; los archivos nuevos se muestran en el estado Git.</small>
+                    <pre className="git-diff" aria-label="Diff de cambios Git">{gitDiff}</pre>
+                  </div>
+                )}
                 {currentLog ? (
                   <div className="build-log" role="log" aria-live="polite">
                     {visibleLogEntries.map((entry) => (
@@ -1354,6 +1616,66 @@ export default function App() {
                 Continuar
               </button>
             </div>
+          </section>
+        </div>
+      )}
+      {historyOpen && (
+        <div className="setup-modal-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setHistoryOpen(false);
+        }}>
+          <section className="setup-modal history-modal" role="dialog" aria-modal="true" aria-labelledby="history-title">
+            <div className="setup-modal-icon"><History size={21} /></div>
+            <h2 id="history-title">Historial local</h2>
+            <p>Los puntos se guardan en la caché privada de Latex Workbench. Se conservan hasta 10; restaurar sobrescribe archivos de ese punto, pero no elimina archivos actuales que no estén en él.</p>
+            <div className="history-actions">
+              <button className="primary" onClick={() => void saveSnapshot()} disabled={snapshotLoading}>
+                {snapshotLoading ? <LoaderCircle className="spin" size={14} /> : <Plus size={14} />} Guardar punto ahora
+              </button>
+              <button className="secondary" onClick={() => void refreshSnapshots()} disabled={snapshotLoading}>
+                <RefreshCw size={14} /> Actualizar
+              </button>
+            </div>
+            {snapshotLoading && <p role="status">Procesando historial…</p>}
+            {!snapshotLoading && snapshots.length === 0 && <p>Aún no hay puntos de restauración.</p>}
+            <div className="history-list">
+              {snapshots.map((snapshot) => (
+                <div className="history-item" key={snapshot.id}>
+                  <span><b>{new Date(Number(snapshot.id) / 1_000_000).toLocaleString()}</b><small>{snapshot.fileCount} archivos</small></span>
+                  <button onClick={() => void restoreSnapshot(snapshot)} disabled={snapshotLoading}>Restaurar</button>
+                </div>
+              ))}
+            </div>
+            <div className="setup-modal-actions">
+              <button className="secondary" onClick={() => setHistoryOpen(false)}>Cerrar</button>
+            </div>
+          </section>
+        </div>
+      )}
+      {aiDiagnostic && (
+        <div className="setup-modal-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            setAiDiagnostic(null);
+            setAiKey("");
+            setAiExplanation("");
+          }
+        }}>
+          <section className="setup-modal ai-modal" role="dialog" aria-modal="true" aria-labelledby="ai-title">
+            <div className="setup-modal-icon"><Code2 size={21} /></div>
+            <h2 id="ai-title">Explicación opcional con IA</h2>
+            <p>Se enviará solo el diagnóstico mostrado a OpenAI. No se enviarán tus archivos ni el resto del log. La clave permanece en memoria y no se guarda.</p>
+            <blockquote>{aiDiagnostic}</blockquote>
+            <label htmlFor="ai-model">Modelo OpenAI</label>
+            <input id="ai-model" value={aiModel} onChange={(event) => setAiModel(event.target.value)} placeholder="Escribe un modelo habilitado en tu cuenta" />
+            <label htmlFor="ai-key">Clave API</label>
+            <input id="ai-key" type="password" autoComplete="off" value={aiKey} onChange={(event) => setAiKey(event.target.value)} placeholder="sk-…" />
+            <div className="ai-modal-actions">
+              <button className="primary" onClick={() => void explainDiagnosticWithAi()} disabled={aiLoading || !aiKey.trim() || !aiModel.trim()}>
+                {aiLoading ? <LoaderCircle className="spin" size={14} /> : <Code2 size={14} />} Enviar diagnóstico
+              </button>
+              <button className="secondary" onClick={() => { setAiDiagnostic(null); setAiKey(""); setAiExplanation(""); }}>Cerrar y borrar clave</button>
+            </div>
+            {aiError && <p role="alert" className="ai-error">{aiError}</p>}
+            {aiExplanation && <div className="ai-explanation" aria-live="polite">{aiExplanation}</div>}
           </section>
         </div>
       )}

@@ -2,7 +2,7 @@
 
 Latex Workbench es una aplicación de escritorio local para editar, compilar y exportar proyectos LaTeX. Ofrece un flujo de trabajo de tres paneles inspirado en Overleaf, pero trabaja directamente con carpetas locales y repositorios Git: tus fuentes y recursos permanecen en tu equipo.
 
-Al iniciar, puedes abrir un proyecto existente o crear un artículo, una tesis, una presentación Beamer o una carta desde una plantilla. La app solo crea la estructura nueva dentro de una carpeta vacía que selecciones.
+Al iniciar, puedes abrir un proyecto existente o crear un artículo, una tesis, una presentación Beamer, una carta o un artículo en formato IEEE/ACM desde una plantilla. Las plantillas IEEE/ACM requieren que la distribución TeX instalada incluya `IEEEtran`/`acmart`. La app solo crea la estructura nueva dentro de una carpeta vacía que selecciones.
 
 ## Arquitectura
 
@@ -84,13 +84,17 @@ pnpm test
 
 - Detecta documentos raíz buscando `\\documentclass` y permite trabajar con proyectos de cualquier estructura.
 - Edita fuentes LaTeX y bibliografía BibTeX con CodeMirror.
+- Valida localmente las entradas BibTeX para detectar claves duplicadas, llaves sin cerrar y campos bibliográficos comunes ausentes; no consulta servicios externos ni modifica el contenido automáticamente.
+- Permite buscar metadatos bibliográficos por DOI en Crossref bajo petición explícita; solo se envía el DOI, y la referencia se previsualiza antes de añadirla al borrador.
+- Guarda hasta 10 puntos de restauración locales en la caché privada de la app. Restaurar sobrescribe los archivos incluidos en el punto, crea antes una copia de seguridad y no elimina los archivos posteriores que no estén en el punto.
+- Puede enviar un diagnóstico de compilación individual a OpenAI para explicarlo si el usuario configura una clave temporal y pulsa enviar; no se mandan fuentes ni el registro completo.
 - Compila con LuaLaTeX, XeLaTeX, pdfLaTeX, Latexmk o Tectonic, si están disponibles y el aislamiento está activo.
 - Ofrece perfiles Vista previa (incremental) y Release (reconstrucción completa con Latexmk).
 - Permite guardar explícitamente el documento principal, el motor y el perfil en `.latex-workbench.json`.
 - Muestra diagnósticos de motores, aislamiento y Git antes de abrir un proyecto.
 - Aísla la compilación: bloquea la red, monta las fuentes como solo lectura y limita la escritura a la caché temporal.
 - Incluye un visor PDF, navegación por secciones, árbol de archivos y previsualización de imágenes.
-- Integra una terminal PTY y acciones de Git para consultar el estado, hacer fetch, pull y push.
+- Integra una terminal PTY y acciones de Git para consultar el estado, revisar el diff local y hacer fetch, pull y push; pull y push piden confirmación.
 - Exporta el PDF y las fuentes del proyecto en archivos ZIP.
 - Mantiene `shell-escape` desactivado de forma predeterminada. Actívalo solo para documentos de confianza, ya que permite ejecutar programas externos.
 

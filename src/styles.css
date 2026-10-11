@@ -282,6 +282,61 @@ body.resize-bottom { cursor: row-resize; }
 .log-empty { padding: 8px 4px; color: #7a8580; font-style: italic; }
 .git-output { white-space: pre-wrap; overflow-wrap: anywhere; }
 .git-output { padding: 6px 8px; background: #f0f3ef; border-radius: 5px; }
+.git-diff-container { margin: 4px 0; }
+.git-diff-container small { color: #68747f; font-size: 10px; }
+.git-diff { margin: 4px 0; padding: 8px; overflow: auto; color: #34443b; background: #f7f8f6; border: 1px solid #e2e6e2; border-radius: 5px; font: 11px/1.5 "SFMono-Regular", Consolas, monospace; white-space: pre; }
+.bibliography-check { flex: 0 0 auto; max-height: 35%; overflow: auto; border-bottom: 1px solid #dfe5e1; color: #42534a; background: #f7faf7; font-size: 11px; }
+.bibliography-check summary { min-height: 30px; padding: 7px 10px; display: flex; align-items: center; gap: 7px; cursor: pointer; list-style: none; }
+.bibliography-check summary::-webkit-details-marker { display: none; }
+.bibliography-check.is-valid summary { color: #24754c; }
+.bibliography-check.has-warnings summary { color: #835e18; }
+.bibliography-check.has-errors summary { color: #963b3b; }
+.bibliography-check ul { margin: 0; padding: 0 10px 7px 31px; list-style: none; }
+.bibliography-check li button { padding: 3px 0; border: 0; color: inherit; background: transparent; text-align: left; font-size: 10px; }
+.bibliography-check li button:hover { text-decoration: underline; }
+.bibliography-check li.error { color: #963b3b; }
+.bibliography-check li.warning { color: #835e18; }
+.doi-import { padding: 8px 10px; border-top: 1px solid #e3e8e4; display: grid; gap: 5px; }
+.doi-import label { font-weight: 650; }
+.doi-import > div:first-of-type { display: flex; gap: 5px; }
+.doi-import input { min-width: 0; flex: 1; padding: 5px 7px; border: 1px solid #cdd8d1; border-radius: 5px; font-size: 11px; }
+.doi-import button { padding: 5px 9px; border: 1px solid #b8c9be; border-radius: 5px; color: #27563c; background: white; font-size: 10px; }
+.doi-import button:disabled { opacity: .55; cursor: default; }
+.doi-import small { color: #68747f; font-size: 9px; }
+.doi-import p { margin: 2px 0; color: #963b3b; }
+.doi-result { align-items: center; justify-content: space-between; gap: 8px; }
+.doi-result span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-modal { width: min(600px, 100%); }
+.history-actions { display: flex; gap: 8px; margin: 15px 0; }
+.history-actions button { padding: 8px 10px; font-size: 11px; }
+.history-actions .secondary { border: 1px solid #d5dfd8; color: #33443a; background: #f7f9f7; }
+.history-list { max-height: 36vh; overflow: auto; border-top: 1px solid #e0e6e2; }
+.history-item { min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #e7ebe8; }
+.history-item > span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.history-item b { color: #263a30; font-size: 11px; }
+.history-item small { color: #68747f; font-size: 10px; }
+.history-item button { padding: 6px 9px; border: 1px solid #b8c9be; border-radius: 5px; color: #27563c; background: white; font-size: 10px; }
+.history-item button:disabled { opacity: .55; }
+.build-diagnostics { max-height: 38%; overflow: auto; border-bottom: 1px solid #e5e8e5; color: #42534a; background: #fbfcfa; font-size: 11px; }
+.build-diagnostics summary { padding: 7px 11px; cursor: pointer; font-weight: 700; }
+.build-diagnostics ul { margin: 0; padding: 0 12px 8px 25px; list-style: none; }
+.build-diagnostics li { padding: 2px 0; }
+.build-diagnostics li.error { color: #963b3b; }
+.build-diagnostics li.warning { color: #835e18; }
+.build-diagnostics li button { padding: 0; border: 0; color: inherit; background: transparent; text-align: left; font-size: 10px; }
+.build-diagnostics li button:hover { text-decoration: underline; }
+.build-diagnostics li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 10px; }
+.build-diagnostics li > span { min-width: 0; flex: 1; }
+.build-diagnostics li .ai-explain-trigger { flex: 0 0 auto; color: #42694f; }
+.ai-modal { display: flex; flex-direction: column; gap: 8px; }
+.ai-modal label { color: #33443a; font-size: 11px; font-weight: 700; }
+.ai-modal input { padding: 8px 9px; border: 1px solid #cdd8d1; border-radius: 6px; font-size: 12px; }
+.ai-modal blockquote { margin: 4px 0 8px; padding: 9px 11px; border-left: 3px solid #b9cdbf; color: #46544c; background: #f6f8f6; font-size: 11px; }
+.ai-modal-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.ai-modal-actions button { padding: 8px 10px; font-size: 11px; }
+.ai-modal-actions .secondary { border: 1px solid #d5dfd8; color: #33443a; background: #f7f9f7; }
+.ai-error { color: #963b3b !important; }
+.ai-explanation { max-height: 30vh; overflow: auto; padding: 11px; border: 1px solid #dce5df; border-radius: 7px; color: #34443b; background: #f7faf7; font-size: 12px; line-height: 1.6; white-space: pre-wrap; }
 
 .statusbar { display: flex; align-items: center; gap: 16px; padding: 0 9px; background: #222b37; color: #b7c0ca; border-top: 1px solid #465264; font-size: 10px; }
 .statusbar .spacer { flex: 1; }.statusbar button { height: 100%; border: 0; background: transparent; display: flex; align-items: center; gap: 5px; color: inherit; }

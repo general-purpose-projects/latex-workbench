@@ -12,7 +12,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU32, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{Emitter, Manager};
 use tokio::{
@@ -26,6 +26,7 @@ const BUILD_DIR: &str = ".latex-workbench";
 const MAX_PROJECT_FILES: usize = 10_000;
 const MAX_BUILD_LOG_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CACHE_METADATA_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PROJECT_SNAPSHOTS: usize = 10;
 const BUILD_LOG_TRUNCATED: &str = "\n[Registro truncado: límite de 2 MiB]\n";
 const BUILD_PIPELINE_VERSION: &[u8] = b"4-sandboxed-profile-build";
 const PROJECT_CONFIG_FILE: &str = ".latex-workbench.json";
@@ -145,6 +146,13 @@ struct ProjectInfo {
     truncated: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectSnapshot {
+    id: String,
+    file_count: usize,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BuildRequest {
@@ -161,6 +169,8 @@ struct BuildRequest {
 struct Diagnostic {
     severity: &'static str,
     message: String,
+    file: Option<String>,
+    line: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,6 +204,8 @@ struct SourceLocation {
 struct GitResult {
     success: bool,
     output: String,
+    status: Option<String>,
+    diff: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -835,6 +847,96 @@ Escribe aquí el contenido de tu carta.
 \end{document}
 ",
         )]),
+        "ieee" => Ok(vec![
+            (
+                "main.tex",
+                r"\documentclass[conference]{IEEEtran}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{cite}
+\usepackage{graphicx}
+\usepackage{hyperref}
+
+\title{Título del artículo}
+\author{\IEEEauthorblockN{Nombre del autor}
+\IEEEauthorblockA{Institución\\ correo@example.com}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Escribe aquí un resumen breve del artículo.
+\end{abstract}
+
+\begin{IEEEkeywords}
+palabra clave, investigación
+\end{IEEEkeywords}
+
+\section{Introducción}
+Comienza a escribir tu documento aquí.
+
+\section{Conclusiones}
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+\end{document}
+",
+            ),
+            (
+                "references.bib",
+                r"@article{example2026,
+  author  = {Apellido, Nombre},
+  title   = {Título del artículo},
+  journal = {Nombre de la revista},
+  year    = {2026}
+}
+",
+            ),
+        ]),
+        "acm" => Ok(vec![
+            (
+                "main.tex",
+                r"\documentclass[sigconf,review,anonymous]{acmart}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+
+\title{Título del artículo}
+\author{Nombre del autor}
+\affiliation{
+  \institution{Institución}
+  \country{País}
+}
+\email{correo@example.com}
+\begin{abstract}
+Escribe aquí un resumen breve del artículo.
+\end{abstract}
+\keywords{palabra clave, investigación}
+
+\begin{document}
+\maketitle
+
+\section{Introducción}
+Comienza a escribir tu documento aquí.
+
+\section{Conclusiones}
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+\end{document}
+",
+            ),
+            (
+                "references.bib",
+                r"@inproceedings{example2026,
+  author    = {Apellido, Nombre},
+  title     = {Título del artículo},
+  booktitle = {Actas del evento},
+  year      = {2026}
+}
+",
+            ),
+        ]),
         _ => Err(AppError::Message(
             "Plantilla de proyecto no compatible".into(),
         )),
@@ -1732,20 +1834,57 @@ async fn run_build_command(
         .map_err(|_| AppError::Timeout)?
 }
 
-fn extract_diagnostics(log: &str) -> Vec<Diagnostic> {
+fn diagnostic_location(message: &str, root: &Path) -> Option<(String, usize)> {
+    for (separator, character) in message.char_indices() {
+        if character != ':' {
+            continue;
+        }
+        let remainder = &message[separator + 1..];
+        let digits = remainder.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 || remainder.as_bytes().get(digits) != Some(&b':') {
+            continue;
+        }
+        let raw_path = message[..separator].trim();
+        let path = Path::new(raw_path);
+        let relative = if path.is_absolute() {
+            path.strip_prefix(root).ok()?
+        } else {
+            path.strip_prefix("./").unwrap_or(path)
+        };
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            continue;
+        }
+        let line = remainder[..digits].parse().ok()?;
+        return Some((relative.to_string_lossy().replace('\\', "/"), line));
+    }
+    None
+}
+
+fn extract_diagnostics(log: &str, root: &Path) -> Vec<Diagnostic> {
     log.lines()
         .filter_map(|line| {
             let trimmed = line.trim();
             let lower = trimmed.to_lowercase();
+            let (file, line) = diagnostic_location(trimmed, root)
+                .map(|(file, line)| (Some(file), Some(line)))
+                .unwrap_or((None, None));
             if trimmed.starts_with('!') || lower.contains("error:") {
                 Some(Diagnostic {
                     severity: "error",
                     message: trimmed.to_string(),
+                    file,
+                    line,
                 })
             } else if lower.contains("warning") || lower.starts_with("overfull") {
                 Some(Diagnostic {
                     severity: "warning",
                     message: trimmed.to_string(),
+                    file,
+                    line,
                 })
             } else {
                 None
@@ -1822,7 +1961,7 @@ async fn compile_project_inner(
         let final_fingerprint = project_fingerprint(&root, &request, &dependency_path)?;
         replace_cache_file(&fingerprint_path, final_fingerprint.as_bytes())?;
     }
-    let diagnostics = extract_diagnostics(&log);
+    let diagnostics = extract_diagnostics(&log, &root);
     Ok(BuildResult {
         success,
         cached: false,
@@ -2016,9 +2155,274 @@ fn export_sources(project_root: String, destination: String) -> Result<(), AppEr
     Ok(())
 }
 
+fn project_history_dir(app: &tauri::AppHandle, root: &Path) -> Result<PathBuf, AppError> {
+    Ok(project_build_dir(root, Some(app))?
+        .parent()
+        .ok_or_else(|| {
+            AppError::Message("No se pudo resolver el almacenamiento de historial".into())
+        })?
+        .join("history"))
+}
+
+fn snapshot_id(path: &Path) -> Option<u128> {
+    path.file_name()?.to_str()?.parse().ok()
+}
+
+fn copy_project_files(root: &Path, destination: &Path) -> Result<usize, AppError> {
+    let walker = WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(false)
+        .git_exclude(false)
+        .filter_entry(ignored_entry)
+        .build();
+    let mut file_count = 0;
+    for entry in walker.skip(1) {
+        let entry = entry.map_err(|error| {
+            AppError::Message(format!(
+                "No se pudo crear el punto de restauración: {error}"
+            ))
+        })?;
+        let source = entry.path();
+        if fs::symlink_metadata(source)?.file_type().is_symlink() {
+            continue;
+        }
+        let relative = source
+            .strip_prefix(root)
+            .map_err(|_| AppError::InvalidPath(source.to_string_lossy().into_owned()))?;
+        let target = destination.join(relative);
+        if source.is_dir() {
+            fs::create_dir_all(target)?;
+        } else if source.is_file() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(source, target)?;
+            file_count += 1;
+        }
+    }
+    Ok(file_count)
+}
+
+fn restore_project_files(snapshot: &Path, root: &Path) -> Result<usize, AppError> {
+    let walker = WalkBuilder::new(snapshot).hidden(false).build();
+    let mut file_count = 0;
+    for entry in walker.skip(1) {
+        let entry = entry.map_err(|error| {
+            AppError::Message(format!("No se pudo leer el punto de restauración: {error}"))
+        })?;
+        let source = entry.path();
+        if fs::symlink_metadata(source)?.file_type().is_symlink() {
+            continue;
+        }
+        let relative = source
+            .strip_prefix(snapshot)
+            .map_err(|_| AppError::InvalidPath(source.to_string_lossy().into_owned()))?;
+        if relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(AppError::InvalidPath(
+                relative.to_string_lossy().into_owned(),
+            ));
+        }
+        let mut target = root.to_path_buf();
+        for component in relative.components() {
+            let std::path::Component::Normal(name) = component else {
+                return Err(AppError::InvalidPath(
+                    relative.to_string_lossy().into_owned(),
+                ));
+            };
+            target.push(name);
+            if target.exists() {
+                let metadata = fs::symlink_metadata(&target)?;
+                if metadata.file_type().is_symlink()
+                    || (target != root && source.is_dir() && !metadata.is_dir())
+                {
+                    return Err(AppError::InvalidPath(
+                        relative.to_string_lossy().into_owned(),
+                    ));
+                }
+            } else if source.is_dir() {
+                fs::create_dir(&target)?;
+            }
+        }
+        if source.is_file() {
+            if let Some(parent) = target.parent() {
+                let parent_metadata = fs::symlink_metadata(parent)?;
+                if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+                    return Err(AppError::InvalidPath(
+                        relative.to_string_lossy().into_owned(),
+                    ));
+                }
+            }
+            if fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(AppError::InvalidPath(
+                    relative.to_string_lossy().into_owned(),
+                ));
+            }
+            fs::copy(source, target)?;
+            file_count += 1;
+        }
+    }
+    Ok(file_count)
+}
+
+fn trim_project_snapshots(
+    history: &Path,
+    protected_snapshot: Option<u128>,
+) -> Result<(), AppError> {
+    let mut snapshots: Vec<_> = fs::read_dir(history)?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| snapshot_id(&entry.path()).map(|id| (id, entry.path())))
+        .collect();
+    snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.0));
+    let mut retained_paths = Vec::new();
+    if let Some(protected_id) = protected_snapshot
+        && let Some((_, path)) = snapshots.iter().find(|(id, _)| *id == protected_id)
+    {
+        retained_paths.push(path.clone());
+    }
+    for (_, path) in &snapshots {
+        if retained_paths.len() == MAX_PROJECT_SNAPSHOTS {
+            break;
+        }
+        if !retained_paths.contains(path) {
+            retained_paths.push(path.clone());
+        }
+    }
+    for (_, path) in snapshots {
+        if !retained_paths.contains(&path) {
+            fs::remove_dir_all(path)?;
+        }
+    }
+    Ok(())
+}
+
+fn create_project_snapshot(
+    app: &tauri::AppHandle,
+    root: &Path,
+    protected_snapshot: Option<u128>,
+) -> Result<ProjectSnapshot, AppError> {
+    let history = project_history_dir(app, root)?;
+    fs::create_dir_all(&history)?;
+    let id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| AppError::Message(error.to_string()))?
+        .as_nanos();
+    let destination = history.join(id.to_string());
+    fs::create_dir(&destination)?;
+    let result = copy_project_files(root, &destination);
+    let file_count = match result {
+        Ok(file_count) => file_count,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&destination);
+            return Err(error);
+        }
+    };
+
+    trim_project_snapshots(&history, protected_snapshot)?;
+    Ok(ProjectSnapshot {
+        id: id.to_string(),
+        file_count,
+    })
+}
+
+#[tauri::command]
+fn list_project_snapshots(
+    app: tauri::AppHandle,
+    project_root: String,
+) -> Result<Vec<ProjectSnapshot>, AppError> {
+    let root = canonical_root(&project_root)?;
+    let history = project_history_dir(&app, &root)?;
+    let mut snapshots = Vec::new();
+    let entries = match fs::read_dir(history) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(snapshots),
+        Err(error) => return Err(AppError::Io(error)),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(id) = snapshot_id(&entry.path()) else {
+            continue;
+        };
+        let walker = WalkBuilder::new(entry.path()).hidden(false).build();
+        let file_count = walker
+            .skip(1)
+            .filter_map(Result::ok)
+            .filter(|item| item.file_type().is_some_and(|kind| kind.is_file()))
+            .count();
+        snapshots.push(ProjectSnapshot {
+            id: id.to_string(),
+            file_count,
+        });
+    }
+    snapshots.sort_by(|left, right| right.id.cmp(&left.id));
+    Ok(snapshots)
+}
+
+#[tauri::command]
+fn create_project_snapshot_command(
+    app: tauri::AppHandle,
+    project_root: String,
+) -> Result<ProjectSnapshot, AppError> {
+    let root = canonical_root(&project_root)?;
+    create_project_snapshot(&app, &root, None)
+}
+
+#[tauri::command]
+fn restore_project_snapshot(
+    app: tauri::AppHandle,
+    project_root: String,
+    snapshot_id: String,
+) -> Result<ProjectSnapshot, AppError> {
+    let id = snapshot_id
+        .parse::<u128>()
+        .map_err(|_| AppError::InvalidPath(snapshot_id.clone()))?;
+    let root = canonical_root(&project_root)?;
+    let history = project_history_dir(&app, &root)?;
+    let snapshot = history.join(id.to_string());
+    if !fs::symlink_metadata(&snapshot)?.file_type().is_dir() {
+        return Err(AppError::InvalidPath(snapshot_id));
+    }
+    create_project_snapshot(&app, &root, Some(id))?;
+    let file_count = restore_project_files(&snapshot, &root)?;
+    Ok(ProjectSnapshot {
+        id: id.to_string(),
+        file_count,
+    })
+}
+
 #[tauri::command]
 async fn git_action(project_root: String, action: String) -> Result<GitResult, AppError> {
     let root = canonical_root(&project_root)?;
+    if action == "changes" {
+        let status = Command::new("git")
+            .args(["status", "--short", "--branch"])
+            .current_dir(&root)
+            .output()
+            .await?;
+        let diff = Command::new("git")
+            .args(["diff", "HEAD", "--no-ext-diff", "--unified=3", "--"])
+            .current_dir(&root)
+            .output()
+            .await?;
+        let success = status.status.success() && diff.status.success();
+        let mut status_text = String::from_utf8_lossy(&status.stdout).into_owned();
+        status_text.push_str(&String::from_utf8_lossy(&status.stderr));
+        let mut diff_text = String::from_utf8_lossy(&diff.stdout).into_owned();
+        diff_text.push_str(&String::from_utf8_lossy(&diff.stderr));
+        return Ok(GitResult {
+            success,
+            output: String::new(),
+            status: Some(status_text),
+            diff: Some(diff_text),
+        });
+    }
     let args: &[&str] = match action.as_str() {
         "status" => &["status", "--short", "--branch"],
         "pull" => &["pull", "--ff-only"],
@@ -2036,6 +2440,8 @@ async fn git_action(project_root: String, action: String) -> Result<GitResult, A
     Ok(GitResult {
         success: output.status.success(),
         output: text,
+        status: None,
+        diff: None,
     })
 }
 
@@ -2212,6 +2618,9 @@ pub fn run() {
             inverse_search,
             export_pdf,
             export_sources,
+            list_project_snapshots,
+            create_project_snapshot_command,
+            restore_project_snapshot,
             git_action,
             start_terminal,
             write_terminal,
@@ -2242,13 +2651,133 @@ mod tests {
     }
 
     #[test]
+    fn restoring_project_files_restores_snapshot_without_deleting_new_files() {
+        let base = std::env::temp_dir().join(format!(
+            "latex-workbench-history-{}-{}",
+            std::process::id(),
+            PROJECT_CONFIG_TEMP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        let root = base.join("project");
+        let snapshot = base.join("snapshot");
+        fs::create_dir_all(root.join("chapters")).expect("project directories");
+        fs::create_dir_all(&snapshot).expect("snapshot directory");
+        fs::write(root.join("main.tex"), "original").expect("project source");
+        fs::write(root.join("chapters/intro.tex"), "chapter").expect("project chapter");
+
+        assert_eq!(
+            copy_project_files(&root, &snapshot).expect("create snapshot"),
+            2
+        );
+        fs::write(root.join("main.tex"), "modified").expect("modify source");
+        fs::remove_dir_all(root.join("chapters")).expect("remove chapter");
+        fs::write(root.join("later.tex"), "keep").expect("later file");
+
+        assert_eq!(
+            restore_project_files(&snapshot, &root).expect("restore snapshot"),
+            2
+        );
+
+        assert_eq!(
+            fs::read_to_string(root.join("main.tex")).expect("restored source"),
+            "original"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("chapters/intro.tex")).expect("restored chapter"),
+            "chapter"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("later.tex")).expect("preserved later file"),
+            "keep"
+        );
+        fs::remove_dir_all(base).expect("remove temporary history");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restoring_project_files_rejects_symlink_destinations() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "latex-workbench-history-symlink-{}-{}",
+            std::process::id(),
+            PROJECT_CONFIG_TEMP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        let root = base.join("project");
+        let snapshot = base.join("snapshot");
+        let outside = base.join("outside");
+        fs::create_dir_all(&root).expect("project directory");
+        fs::create_dir_all(&snapshot).expect("snapshot directory");
+        fs::write(&outside, "unchanged").expect("outside file");
+        fs::write(snapshot.join("source.tex"), "snapshot").expect("snapshot source");
+        symlink(&outside, root.join("source.tex")).expect("destination symlink");
+
+        assert!(restore_project_files(&snapshot, &root).is_err());
+        assert_eq!(
+            fs::read_to_string(outside).expect("outside contents"),
+            "unchanged"
+        );
+        fs::remove_dir_all(base).expect("remove temporary history");
+    }
+
+    #[test]
+    fn snapshot_retention_keeps_ten_and_preserves_the_restored_point() {
+        let history = std::env::temp_dir().join(format!(
+            "latex-workbench-history-retention-{}-{}",
+            std::process::id(),
+            PROJECT_CONFIG_TEMP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir_all(&history).expect("history directory");
+        for id in 1..=12 {
+            fs::create_dir(history.join(id.to_string())).expect("snapshot directory");
+        }
+
+        trim_project_snapshots(&history, Some(1)).expect("trim snapshots");
+
+        let mut retained: Vec<_> = fs::read_dir(&history)
+            .expect("list retained snapshots")
+            .map(|entry| snapshot_id(&entry.expect("snapshot entry").path()).unwrap())
+            .collect();
+        retained.sort_unstable();
+        assert_eq!(retained.len(), MAX_PROJECT_SNAPSHOTS);
+        assert!(retained.contains(&1));
+        assert!(!retained.contains(&2));
+        fs::remove_dir_all(history).expect("remove temporary history");
+    }
+
+    #[test]
     fn diagnostics_separate_errors_and_warnings() {
         let diagnostics = extract_diagnostics(
-            "LaTeX Warning: Reference undefined\n! Undefined control sequence.\nOutput written",
+            "LaTeX Warning: Reference undefined\n./chapters/intro.tex:12: error: Undefined control sequence.\nOutput written",
+            Path::new("."),
         );
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(diagnostics[0].severity, "warning");
         assert_eq!(diagnostics[1].severity, "error");
+        assert_eq!(diagnostics[1].file.as_deref(), Some("chapters/intro.tex"));
+        assert_eq!(diagnostics[1].line, Some(12));
+    }
+
+    #[test]
+    fn diagnostic_locations_reject_paths_outside_the_project() {
+        let root = std::env::temp_dir().join(format!(
+            "latex-workbench-diagnostic-root-{}",
+            std::process::id()
+        ));
+        let inside = diagnostic_location("./chapters/intro.tex:12: error", &root);
+        let traversal = diagnostic_location("../private.tex:12: error", &root);
+        let absolute = diagnostic_location(
+            &format!(
+                "{}:12: error",
+                root.parent()
+                    .expect("temporary directory")
+                    .join("private.tex")
+                    .display()
+            ),
+            &root,
+        );
+        assert_eq!(inside, Some(("chapters/intro.tex".into(), 12)));
+        assert_eq!(traversal, None);
+        assert_eq!(absolute, None);
     }
 
     #[test]
@@ -2325,7 +2854,7 @@ mod tests {
 
     #[test]
     fn project_templates_include_a_main_document() {
-        for template in ["article", "thesis", "beamer", "letter"] {
+        for template in ["article", "thesis", "beamer", "letter", "ieee", "acm"] {
             let files = project_template_files(template).expect("supported template");
             assert!(
                 files
@@ -2335,6 +2864,16 @@ mod tests {
                 "{template} is missing its main document"
             );
         }
+        let ieee = project_template_files("ieee").expect("IEEE template");
+        assert!(
+            ieee.iter()
+                .any(|(path, content)| *path == "main.tex" && content.contains("IEEEtran"))
+        );
+        let acm = project_template_files("acm").expect("ACM template");
+        assert!(
+            acm.iter()
+                .any(|(path, content)| *path == "main.tex" && content.contains("acmart"))
+        );
         assert!(project_template_files("unknown").is_err());
     }
 
