@@ -1,13 +1,11 @@
 # Seguridad
 
-## Documentos no confiables
+## Compilación de proyectos
 
-Los proyectos LaTeX pueden ejecutar herramientas externas cuando `shell-escape` está habilitado. Esta opción permanece desactivada por defecto. No la actives para repositorios que no controles.
+Los documentos LaTeX y sus dependencias pueden contener instrucciones que ejecuten programas externos. `shell-escape` está desactivado de forma predeterminada y solo debe habilitarse para proyectos de confianza. La compilación se ejecuta con aislamiento local: Linux requiere `bubblewrap` y macOS usa `sandbox-exec`; el proyecto se monta como solo lectura, la caché de compilación es escribible, se bloquea la red y se elimina del proceso de compilación el resto de las variables heredadas del entorno. Si el aislamiento no está disponible, la compilación falla de forma cerrada. En Windows la compilación permanece bloqueada hasta que exista un sandbox compatible.
 
-## Reportes
+El aislamiento reduce el acceso del proceso, pero no sustituye las actualizaciones del sistema operativo ni protege frente a fallos del kernel o del propio sandbox. El terminal integrado y las acciones Git son procesos locales iniciados por el usuario y no usan el sandbox de compilación. No abras proyectos no confiables en la terminal ni habilites `shell-escape` para ellos.
 
-No publiques vulnerabilidades explotables como issues. Usa el canal privado de reportes de seguridad de GitHub cuando el repositorio remoto esté configurado.
+## Reportar vulnerabilidades
 
-## Alcance del MVP
-
-La versión 0.1 ejecuta compiladores con los permisos del usuario local. El aislamiento fuerte para compilación remota o multiusuario todavía no forma parte de esta versión.
+No publiques vulnerabilidades explotables como issues. Usa el canal privado de reportes de seguridad de GitHub para este repositorio.

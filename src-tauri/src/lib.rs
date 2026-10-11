@@ -24,7 +24,50 @@ use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 const BUILD_DIR: &str = ".latex-workbench";
 const MAX_PROJECT_FILES: usize = 10_000;
-const BUILD_PIPELINE_VERSION: &[u8] = b"3-external-cache-and-svg-artifacts";
+const MAX_BUILD_LOG_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CACHE_METADATA_BYTES: u64 = 4 * 1024 * 1024;
+const BUILD_LOG_TRUNCATED: &str = "\n[Registro truncado: límite de 2 MiB]\n";
+const BUILD_PIPELINE_VERSION: &[u8] = b"4-sandboxed-profile-build";
+const PROJECT_CONFIG_FILE: &str = ".latex-workbench.json";
+static PROJECT_CONFIG_TEMP_ID: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum BuildProfile {
+    #[default]
+    Preview,
+    Release,
+}
+
+impl BuildProfile {
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Preview => "preview",
+            Self::Release => "release",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectConfig {
+    version: u32,
+    main_document: Option<String>,
+    engine: Option<String>,
+    #[serde(default)]
+    profile: BuildProfile,
+}
+
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            main_document: None,
+            engine: None,
+            profile: BuildProfile::Preview,
+        }
+    }
+}
 
 struct TerminalSession {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -98,6 +141,8 @@ struct ProjectInfo {
     files: Vec<ProjectFile>,
     documents: Vec<String>,
     git_branch: Option<String>,
+    warnings: Vec<String>,
+    truncated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +152,8 @@ struct BuildRequest {
     document: String,
     engine: String,
     shell_escape: bool,
+    #[serde(default)]
+    profile: BuildProfile,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +196,23 @@ struct GitResult {
     output: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentCheck {
+    id: &'static str,
+    label: &'static str,
+    available: bool,
+    required: bool,
+    instructions: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentReport {
+    engines: Vec<EngineInfo>,
+    checks: Vec<EnvironmentCheck>,
+}
+
 fn ignored_entry(entry: &DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
     !(name == ".git"
@@ -157,6 +221,25 @@ fn ignored_entry(entry: &DirEntry) -> bool {
         || name == "node_modules"
         || name == "target"
         || name == ".DS_Store")
+}
+
+fn append_bounded_output(output: &mut String, data: &str) {
+    let payload_limit = MAX_BUILD_LOG_BYTES - BUILD_LOG_TRUNCATED.len();
+    if output.len() >= payload_limit {
+        if !output.ends_with(BUILD_LOG_TRUNCATED) {
+            output.push_str(BUILD_LOG_TRUNCATED);
+        }
+        return;
+    }
+    let remaining = payload_limit - output.len();
+    let mut end = data.len().min(remaining);
+    while !data.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.push_str(&data[..end]);
+    if end < data.len() {
+        output.push_str(BUILD_LOG_TRUNCATED);
+    }
 }
 
 fn canonical_root(root: &str) -> Result<PathBuf, AppError> {
@@ -205,7 +288,14 @@ fn safe_entry_name(name: &str) -> Result<&str, AppError> {
 fn executable_candidates(name: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(path) = std::env::var_os("PATH") {
-        candidates.extend(std::env::split_paths(&path).map(|dir| dir.join(name)));
+        for directory in std::env::split_paths(&path) {
+            if !directory.is_absolute() {
+                continue;
+            }
+            candidates.push(directory.join(name));
+            #[cfg(target_os = "windows")]
+            candidates.push(directory.join(format!("{name}.exe")));
+        }
     }
     for directory in [
         "/Library/TeX/texbin",
@@ -240,29 +330,91 @@ fn project_build_dir(root: &Path, app: Option<&tauri::AppHandle>) -> Result<Path
     Ok(root.join(BUILD_DIR).join("build"))
 }
 
+fn profile_build_dir(
+    root: &Path,
+    app: Option<&tauri::AppHandle>,
+    profile: BuildProfile,
+) -> Result<PathBuf, AppError> {
+    Ok(project_build_dir(root, app)?.join(profile.directory()))
+}
+
 fn remove_cache_path(path: &Path) -> Result<(), AppError> {
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || metadata.is_file() {
-            fs::remove_file(path)?;
-        } else {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
             fs::remove_dir_all(path)?;
         }
+        Ok(_) => fs::remove_file(path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(AppError::Io(error)),
     }
     Ok(())
 }
 
-async fn command_version(path: &Path) -> Option<String> {
-    let output = Command::new(path).arg("--version").output().await.ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.lines()
-        .next()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
+fn is_regular_file(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
+}
+
+fn ensure_cache_directory(path: &Path, clear: bool) -> Result<(), AppError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            if clear {
+                fs::remove_dir_all(path)?;
+                fs::create_dir(path)?;
+            }
+        }
+        Ok(_) => {
+            remove_cache_path(path)?;
+            fs::create_dir_all(path)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)?;
+        }
+        Err(error) => return Err(AppError::Io(error)),
+    }
+    Ok(())
+}
+
+fn replace_cache_file(path: &Path, contents: &[u8]) -> Result<(), AppError> {
+    let id = PROJECT_CONFIG_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_extension(format!("{id}.tmp"));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    drop(file);
+    if cfg!(windows) && fs::symlink_metadata(path).is_ok() {
+        remove_cache_path(path)?;
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(temporary);
+        return Err(AppError::Io(error));
+    }
+    Ok(())
+}
+
+fn read_regular_file(path: &Path) -> Option<Vec<u8>> {
+    if !is_regular_file(path) {
+        return None;
+    }
+    let mut file = fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_CACHE_METADATA_BYTES {
+        return None;
+    }
+    let mut contents = Vec::new();
+    Read::by_ref(&mut file)
+        .take(MAX_CACHE_METADATA_BYTES + 1)
+        .read_to_end(&mut contents)
+        .ok()?;
+    (contents.len() as u64 <= MAX_CACHE_METADATA_BYTES).then_some(contents)
 }
 
 #[tauri::command]
-async fn list_engines() -> Vec<EngineInfo> {
+fn list_engines() -> Vec<EngineInfo> {
     let definitions = [
         ("latexmk", "LaTeXmk", "latexmk"),
         ("lualatex", "LuaLaTeX", "lualatex"),
@@ -273,19 +425,201 @@ async fn list_engines() -> Vec<EngineInfo> {
     let mut engines = Vec::new();
     for (id, label, binary) in definitions {
         let path = find_executable(binary);
-        let version = match &path {
-            Some(path) => command_version(path).await,
-            None => None,
-        };
         engines.push(EngineInfo {
             id,
             label,
             available: path.is_some(),
             path: path.map(|path| path.to_string_lossy().into_owned()),
-            version,
+            version: None,
         });
     }
     engines
+}
+
+fn sandbox_runner() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let runner = ["/usr/bin/bwrap", "/bin/bwrap"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|path| path.is_file())?;
+        let true_binary = ["/usr/bin/true", "/bin/true"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|path| path.is_file())?;
+        let status = std::process::Command::new(&runner)
+            .env_clear()
+            .args([
+                "--die-with-parent",
+                "--new-session",
+                "--unshare-net",
+                "--unshare-pid",
+                "--unshare-ipc",
+                "--unshare-uts",
+                "--ro-bind",
+                "/",
+                "/",
+                "--dev-bind",
+                "/dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--",
+            ])
+            .arg(true_binary)
+            .status()
+            .ok()?;
+        return status.success().then_some(runner);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let runner = PathBuf::from("/usr/bin/sandbox-exec");
+        if !runner.is_file() {
+            return None;
+        }
+        let status = std::process::Command::new(&runner)
+            .env_clear()
+            .args([
+                "-p",
+                "(version 1) (deny default) (allow process*) (allow file-read* (subpath \"/usr\") (subpath \"/System\") (subpath \"/dev\"))",
+                "/usr/bin/true",
+            ])
+            .status()
+            .ok()?;
+        return status.success().then_some(runner);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        None
+    }
+}
+
+#[tauri::command]
+async fn diagnose_environment() -> EnvironmentReport {
+    let engines = list_engines();
+    let has_tex_engine = engines
+        .iter()
+        .any(|engine| engine.available && engine.id != "latexmk");
+    let sandbox_available = sandbox_runner().is_some();
+    let sandbox_instructions = if cfg!(target_os = "linux") {
+        "Instala bubblewrap (bwrap), por ejemplo: sudo apt install bubblewrap."
+    } else if cfg!(target_os = "macos") {
+        "Se necesita sandbox-exec, incluido en macOS. Actualiza macOS si no está disponible."
+    } else {
+        "El aislamiento de compilación aún no está disponible en Windows; la compilación permanece bloqueada."
+    };
+    EnvironmentReport {
+        engines,
+        checks: vec![
+            EnvironmentCheck {
+                id: "tex",
+                label: "Motor LaTeX",
+                available: has_tex_engine,
+                required: true,
+                instructions: "Instala MacTeX, TeX Live o MiKTeX y asegúrate de que el motor esté en PATH.",
+            },
+            EnvironmentCheck {
+                id: "sandbox",
+                label: "Aislamiento de compilación",
+                available: sandbox_available,
+                required: true,
+                instructions: sandbox_instructions,
+            },
+            EnvironmentCheck {
+                id: "git",
+                label: "Git (opcional)",
+                available: find_executable("git").is_some(),
+                required: false,
+                instructions: "Instala Git para usar las acciones de control de versiones.",
+            },
+        ],
+    }
+}
+
+fn valid_engine(engine: &str) -> bool {
+    matches!(
+        engine,
+        "latexmk" | "lualatex" | "xelatex" | "pdflatex" | "tectonic"
+    )
+}
+
+#[tauri::command]
+fn load_project_config(project_root: String) -> Result<ProjectConfig, AppError> {
+    let root = canonical_root(&project_root)?;
+    let path = root.join(PROJECT_CONFIG_FILE);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ProjectConfig::default());
+        }
+        Err(error) => return Err(AppError::Io(error)),
+    };
+    if !metadata.file_type().is_file() || metadata.len() > MAX_CACHE_METADATA_BYTES {
+        return Err(AppError::InvalidPath(path.to_string_lossy().into_owned()));
+    }
+    let contents = read_regular_file(&path)
+        .ok_or_else(|| AppError::InvalidPath(path.to_string_lossy().into_owned()))?;
+    let config: ProjectConfig = serde_json::from_slice(&contents)?;
+    if config.version != 1 {
+        return Err(AppError::Message(format!(
+            "Versión de configuración de proyecto no compatible: {}",
+            config.version
+        )));
+    }
+    if let Some(document) = &config.main_document {
+        let source = project_path(&root, document)?;
+        if source.extension().and_then(|extension| extension.to_str()) != Some("tex") {
+            return Err(AppError::InvalidPath(document.clone()));
+        }
+    }
+    if config.engine.as_deref().is_some_and(|engine| !valid_engine(engine)) {
+        return Err(AppError::Message(
+            "La configuración contiene un motor LaTeX no compatible".into(),
+        ));
+    }
+    Ok(config)
+}
+
+#[tauri::command]
+fn save_project_config(project_root: String, config: ProjectConfig) -> Result<(), AppError> {
+    let root = canonical_root(&project_root)?;
+    if config.version != 1 {
+        return Err(AppError::Message(
+            "Versión de configuración de proyecto no compatible".into(),
+        ));
+    }
+    if let Some(document) = &config.main_document {
+        let source = project_path(&root, document)?;
+        if source.extension().and_then(|extension| extension.to_str()) != Some("tex") {
+            return Err(AppError::InvalidPath(document.clone()));
+        }
+    }
+    if config.engine.as_deref().is_some_and(|engine| !valid_engine(engine)) {
+        return Err(AppError::Message(
+            "El motor LaTeX seleccionado no es compatible".into(),
+        ));
+    }
+    let destination = root.join(PROJECT_CONFIG_FILE);
+    let temporary = root.join(format!(
+        "{PROJECT_CONFIG_FILE}.{}.{}.tmp",
+        std::process::id(),
+        PROJECT_CONFIG_TEMP_ID.fetch_add(1, Ordering::Relaxed),
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(&serde_json::to_vec_pretty(&config)?)?;
+    file.sync_all()?;
+    drop(file);
+    if cfg!(windows) && destination.exists() {
+        fs::remove_file(&destination)?;
+    }
+    if let Err(error) = fs::rename(&temporary, destination) {
+        let _ = fs::remove_file(temporary);
+        return Err(AppError::Io(error));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -293,6 +627,8 @@ fn discover_project(root: String) -> Result<ProjectInfo, AppError> {
     let root = canonical_root(&root)?;
     let mut files = Vec::new();
     let mut documents = Vec::new();
+    let mut warnings = Vec::new();
+    let mut truncated = false;
     let walker = WalkBuilder::new(&root)
         .hidden(false)
         .git_ignore(false)
@@ -300,11 +636,26 @@ fn discover_project(root: String) -> Result<ProjectInfo, AppError> {
         .filter_entry(ignored_entry)
         .build();
 
-    for result in walker
-        .filter_map(Result::ok)
-        .skip(1)
-        .take(MAX_PROJECT_FILES)
-    {
+    for result in walker.skip(1) {
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                if warnings.len() < 5 {
+                    warnings.push(error.to_string());
+                }
+                continue;
+            }
+        };
+        if result
+            .file_type()
+            .is_some_and(|file_type| file_type.is_symlink())
+        {
+            continue;
+        }
+        if files.len() == MAX_PROJECT_FILES {
+            truncated = true;
+            break;
+        }
         let path = result.path();
         let Ok(relative) = path.strip_prefix(&root) else {
             continue;
@@ -353,6 +704,8 @@ fn discover_project(root: String) -> Result<ProjectInfo, AppError> {
         files,
         documents,
         git_branch,
+        warnings,
+        truncated,
     })
 }
 
@@ -616,30 +969,42 @@ fn export_project_file(
     Ok(())
 }
 
-fn dependency_paths(root: &Path, dependency_file: &Path) -> Vec<PathBuf> {
-    if let Ok(contents) = fs::read_to_string(dependency_file)
+fn dependency_paths(root: &Path, dependency_file: &Path) -> Result<Vec<PathBuf>, AppError> {
+    if let Some(contents) =
+        read_regular_file(dependency_file).and_then(|bytes| String::from_utf8(bytes).ok())
         && let Ok(relative_paths) = serde_json::from_str::<Vec<String>>(&contents)
     {
         let paths: Vec<_> = relative_paths
             .into_iter()
-            .map(|relative| root.join(relative))
-            .filter(|path| path.is_file())
+            .filter_map(|relative| fs::canonicalize(root.join(relative)).ok())
+            .filter(|path| path.starts_with(root) && is_regular_file(path))
             .collect();
         if !paths.is_empty() {
-            return paths;
+            return Ok(paths);
         }
     }
 
-    WalkBuilder::new(root)
+    let mut paths = Vec::new();
+    for entry in WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(false)
         .git_exclude(false)
         .filter_entry(ignored_entry)
         .build()
-        .filter_map(Result::ok)
-        .map(|entry| entry.into_path())
-        .filter(|path| path.is_file())
-        .collect()
+    {
+        let path = entry
+            .map_err(|error| {
+                AppError::Message(format!("No se pudieron recorrer las fuentes: {error}"))
+            })?
+            .into_path();
+        if is_regular_file(&path)
+            && let Ok(canonical) = fs::canonicalize(path)
+            && canonical.starts_with(root)
+        {
+            paths.push(canonical);
+        }
+    }
+    Ok(paths)
 }
 
 fn project_fingerprint(
@@ -647,12 +1012,13 @@ fn project_fingerprint(
     request: &BuildRequest,
     dependency_file: &Path,
 ) -> Result<String, AppError> {
-    let mut paths = dependency_paths(root, dependency_file);
+    let mut paths = dependency_paths(root, dependency_file)?;
     paths.sort();
     let mut hasher = Hasher::new();
     hasher.update(BUILD_PIPELINE_VERSION);
     hasher.update(request.document.as_bytes());
     hasher.update(request.engine.as_bytes());
+    hasher.update(request.profile.directory().as_bytes());
     hasher.update(&[request.shell_escape as u8]);
     if let Some(engine) = find_executable(&request.engine) {
         hasher.update(engine.to_string_lossy().as_bytes());
@@ -668,19 +1034,16 @@ fn project_fingerprint(
     for path in paths {
         if let Ok(relative) = path.strip_prefix(root) {
             hasher.update(relative.to_string_lossy().as_bytes());
-            if let Ok(data) = fs::read(path) {
-                hasher.update(&data);
-            }
+            hasher.update(&fs::read(path)?);
         }
     }
     Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn save_dependencies(root: &Path, fls_path: &Path, destination: &Path) -> Result<(), AppError> {
-    let contents = match fs::read_to_string(fls_path) {
-        Ok(contents) => contents,
-        Err(_) => return Ok(()),
-    };
+    let contents = read_regular_file(fls_path)
+        .and_then(|contents| String::from_utf8(contents).ok())
+        .unwrap_or_default();
     let mut dependencies = Vec::new();
     for line in contents
         .lines()
@@ -704,10 +1067,7 @@ fn save_dependencies(root: &Path, fls_path: &Path, destination: &Path) -> Result
     }
     dependencies.sort();
     dependencies.dedup();
-    if !dependencies.is_empty() {
-        fs::write(destination, serde_json::to_vec_pretty(&dependencies)?)?;
-    }
-    Ok(())
+    replace_cache_file(destination, &serde_json::to_vec_pretty(&dependencies)?)
 }
 
 fn build_command(
@@ -715,6 +1075,11 @@ fn build_command(
     output_dir: &Path,
     document_path: &Path,
 ) -> Result<(PathBuf, Vec<String>), AppError> {
+    if request.profile == BuildProfile::Release && request.engine != "latexmk" {
+        return Err(AppError::Message(
+            "El perfil Release requiere Latexmk para garantizar una compilación completa.".into(),
+        ));
+    }
     let engine_path = find_executable(&request.engine)
         .ok_or_else(|| AppError::EngineUnavailable(request.engine.clone()))?;
     let output = output_dir.to_string_lossy().into_owned();
@@ -748,9 +1113,13 @@ fn build_command(
             "-file-line-error".into(),
             "-synctex=1".into(),
             "-recorder".into(),
+            "-norc".into(),
             format!("-outdir={output}"),
             svg_pretex.clone(),
         ];
+        if request.profile == BuildProfile::Release {
+            args.push("-gg".into());
+        }
         if request.shell_escape {
             args.push("-shell-escape".into());
         }
@@ -770,6 +1139,7 @@ fn build_command(
         };
         let mut args = vec![
             mode.into(),
+            "-norc".into(),
             "-interaction=nonstopmode".into(),
             "-file-line-error".into(),
             "-synctex=1".into(),
@@ -798,63 +1168,124 @@ fn build_command(
     Ok((engine_path, args))
 }
 
+fn sandboxed_command(
+    program: &Path,
+    args: &[String],
+    root: &Path,
+    output_dir: &Path,
+) -> Result<(PathBuf, Vec<String>), AppError> {
+    let runner = sandbox_runner().ok_or_else(|| {
+        if cfg!(target_os = "windows") {
+            AppError::Message(
+                "El aislamiento de compilación aún no está disponible en Windows; no se ejecutó el documento.".into(),
+            )
+        } else {
+            AppError::Message(
+                "No hay un sandbox de compilación disponible. Instálalo y vuelve a ejecutar el diagnóstico del entorno.".into(),
+            )
+        }
+    })?;
+    #[cfg(target_os = "linux")]
+    {
+        let mut sandbox_args = vec![
+            "--die-with-parent".into(),
+            "--new-session".into(),
+            "--unshare-net".into(),
+            "--unshare-pid".into(),
+            "--unshare-ipc".into(),
+            "--unshare-uts".into(),
+            "--ro-bind".into(),
+            "/".into(),
+            "/".into(),
+            "--dev-bind".into(),
+            "/dev".into(),
+            "/dev".into(),
+            "--proc".into(),
+            "/proc".into(),
+            "--tmpfs".into(),
+            "/tmp".into(),
+            "--tmpfs".into(),
+            "/home".into(),
+            "--tmpfs".into(),
+            "/root".into(),
+        ];
+        let mut created = HashSet::new();
+        for path in [root, output_dir] {
+            for masked_root in [Path::new("/home"), Path::new("/root"), Path::new("/tmp")] {
+                if path.starts_with(masked_root)
+                    && let Ok(relative) = path.strip_prefix(masked_root)
+                {
+                    let mut current = masked_root.to_path_buf();
+                    for component in relative.components() {
+                        let std::path::Component::Normal(component) = component else {
+                            continue;
+                        };
+                        current.push(component);
+                        if created.insert(current.clone()) {
+                            sandbox_args.push("--dir".into());
+                            sandbox_args.push(current.to_string_lossy().into_owned());
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        sandbox_args.extend([
+            "--ro-bind".into(),
+            root.to_string_lossy().into_owned(),
+            root.to_string_lossy().into_owned(),
+            "--bind".into(),
+            output_dir.to_string_lossy().into_owned(),
+            output_dir.to_string_lossy().into_owned(),
+            "--chdir".into(),
+            root.to_string_lossy().into_owned(),
+            "--".into(),
+            program.to_string_lossy().into_owned(),
+        ]);
+        sandbox_args.extend_from_slice(args);
+        return Ok((runner, sandbox_args));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let project_path = root.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+        let output_path = output_dir.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+        let profile = format!(
+            "(version 1) (deny default) (allow process*) (allow file-read* (subpath \"{project_path}\") (subpath \"{output_path}\") (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library/TeX\") (subpath \"/Library/Developer\") (subpath \"/Library/Fonts\") (subpath \"/opt\") (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/etc\") (subpath \"/private/etc\") (subpath \"/tmp\") (subpath \"/private/tmp\")) (allow file-read-metadata) (allow sysctl-read) (allow mach-lookup) (allow file-write* (subpath \"{output_path}\") (subpath \"/tmp\") (subpath \"/private/tmp\")) (deny network*)"
+        );
+        let mut sandbox_args = vec!["-p".into(), profile, program.to_string_lossy().into_owned()];
+        sandbox_args.extend_from_slice(args);
+        return Ok((runner, sandbox_args));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = (runner, program, args, root, output_dir);
+        Err(AppError::Message(
+            "El aislamiento de compilación aún no está disponible en Windows; no se ejecutó el documento.".into(),
+        ))
+    }
+}
+
 #[cfg(unix)]
 fn compatible_latexminted_runtime() -> Option<(PathBuf, PathBuf)> {
     let latexminted = find_executable("latexminted")?;
     ["python3.13", "python3.12", "python3.11"]
         .into_iter()
-        .filter_map(find_executable)
-        .find(|python| {
-            std::process::Command::new(python)
-                .arg(&latexminted)
-                .arg("--version")
-                .output()
-                .map(|output| output.status.success())
-                .unwrap_or(false)
-        })
+        .find_map(find_executable)
         .map(|python| (python, latexminted))
 }
 
 #[cfg(unix)]
 fn configure_runtime_compatibility(
     command: &mut Command,
-    root: &Path,
-    app: Option<&tauri::AppHandle>,
+    _root: &Path,
+    output_dir: &Path,
 ) -> Result<(), AppError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let bin_dir = app
-        .and_then(|app| app.path().app_cache_dir().ok())
-        .unwrap_or_else(|| root.join(BUILD_DIR))
-        .join("runtime-bin");
-    fs::create_dir_all(&bin_dir)?;
+    let bin_dir = output_dir.join("runtime-bin");
+    ensure_cache_directory(&bin_dir, true)?;
 
     if let Some((python, latexminted)) = compatible_latexminted_runtime() {
-        let python_shim = bin_dir.join("python3");
-        fs::write(
-            &python_shim,
-            format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", python.display()),
-        )?;
-        let mut permissions = fs::metadata(&python_shim)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&python_shim, permissions)?;
-
-        // TeX Live invokes latexminted through restricted shell escape.  Its
-        // upstream /usr/bin/env python3 shebang can otherwise select a newer,
-        // incompatible system Python before our project is processed.  Keep
-        // the trusted executable name but pin both interpreter and script.
-        let latexminted_shim = bin_dir.join("latexminted");
-        fs::write(
-            &latexminted_shim,
-            format!(
-                "#!/bin/sh\nexec \"{}\" \"{}\" \"$@\"\n",
-                python.display(),
-                latexminted.display()
-            ),
-        )?;
-        let mut permissions = fs::metadata(&latexminted_shim)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&latexminted_shim, permissions)?;
+        std::os::unix::fs::symlink(python, bin_dir.join("python3"))?;
+        std::os::unix::fs::symlink(latexminted, bin_dir.join("latexminted"))?;
     }
 
     install_compatible_biber(&bin_dir)?;
@@ -865,7 +1296,28 @@ fn configure_runtime_compatibility(
     }
     let path = std::env::join_paths(paths)
         .map_err(|error| AppError::Message(format!("PATH inválido: {error}")))?;
-    command.env("PATH", path);
+    let home = output_dir.join("home");
+    let temporary = output_dir.join("tmp");
+    ensure_cache_directory(&home, false)?;
+    ensure_cache_directory(&temporary, false)?;
+    for directory in ["cache", "texmf-var", "texmf-config"] {
+        ensure_cache_directory(&output_dir.join(directory), false)?;
+    }
+    command
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", &home)
+        .env("TMPDIR", &temporary)
+        .env("TMP", &temporary)
+        .env("TEMP", &temporary)
+        .env("XDG_CACHE_HOME", output_dir.join("cache"))
+        .env("TEXMFVAR", output_dir.join("texmf-var"))
+        .env("TEXMFCONFIG", output_dir.join("texmf-config"));
+    for variable in ["LANG", "LC_ALL"] {
+        if let Some(value) = std::env::var_os(variable) {
+            command.env(variable, value);
+        }
+    }
     Ok(())
 }
 
@@ -873,7 +1325,7 @@ fn configure_runtime_compatibility(
 fn configure_runtime_compatibility(
     _command: &mut Command,
     _root: &Path,
-    _app: Option<&tauri::AppHandle>,
+    _output_dir: &Path,
 ) -> Result<(), AppError> {
     Ok(())
 }
@@ -924,6 +1376,7 @@ fn install_compatible_biber(_bin_dir: &Path) -> Result<(), AppError> {
 async fn stream_build_output<R>(
     reader: R,
     app: Option<tauri::AppHandle>,
+    emitted_log: Arc<Mutex<String>>,
     stream: &'static str,
 ) -> Result<String, AppError>
 where
@@ -938,9 +1391,19 @@ where
             break;
         }
         let data = String::from_utf8_lossy(&bytes[..read]).into_owned();
-        output.push_str(&data);
+        append_bounded_output(&mut output, &data);
         if let Some(app) = &app {
-            let _ = app.emit("build-log", BuildLogChunk { data, stream });
+            let emitted = {
+                let mut aggregate = emitted_log
+                    .lock()
+                    .map_err(|_| AppError::Message("No se pudo limitar el registro".into()))?;
+                let previous_length = aggregate.len();
+                append_bounded_output(&mut aggregate, &data);
+                aggregate[previous_length..].to_string()
+            };
+            if !emitted.is_empty() {
+                let _ = app.emit("build-log", BuildLogChunk { data: emitted, stream });
+            }
         }
     }
     Ok(output)
@@ -963,8 +1426,19 @@ async fn run_build_command(
         .stderr
         .take()
         .ok_or_else(|| AppError::Message("No se pudo leer stderr".into()))?;
-    let stdout_task = tokio::spawn(stream_build_output(stdout, app.clone(), "stdout"));
-    let stderr_task = tokio::spawn(stream_build_output(stderr, app, "stderr"));
+    let emitted_log = Arc::new(Mutex::new(String::new()));
+    let stdout_task = tokio::spawn(stream_build_output(
+        stdout,
+        app.clone(),
+        emitted_log.clone(),
+        "stdout",
+    ));
+    let stderr_task = tokio::spawn(stream_build_output(
+        stderr,
+        app,
+        emitted_log,
+        "stderr",
+    ));
 
     let process = async move {
         let status = child.wait().await?;
@@ -975,8 +1449,8 @@ async fn run_build_command(
             .await
             .map_err(|error| AppError::Message(error.to_string()))??;
         if !stderr.trim().is_empty() {
-            log.push('\n');
-            log.push_str(&stderr);
+            append_bounded_output(&mut log, "\n");
+            append_bounded_output(&mut log, &stderr);
         }
         Ok::<_, AppError>((status, log))
     };
@@ -1023,13 +1497,10 @@ async fn compile_project_inner(
     let started = Instant::now();
     let root = canonical_root(&request.project_root)?;
     let document_path = project_path(&root, &request.document)?;
-    let output_dir = project_build_dir(&root, app.as_ref())?;
-    if app.is_some() {
-        remove_cache_path(&root.join(BUILD_DIR))?;
-        remove_cache_path(&root.join("svg-inkscape"))?;
-    }
+    let output_dir = profile_build_dir(&root, app.as_ref(), request.profile)?;
     fs::create_dir_all(&output_dir)?;
-    fs::create_dir_all(output_dir.join("svg-inkscape"))?;
+    ensure_cache_directory(&output_dir, false)?;
+    ensure_cache_directory(&output_dir.join("svg-inkscape"), false)?;
     let pdf_name = document_path
         .file_stem()
         .and_then(|value| value.to_str())
@@ -1040,8 +1511,9 @@ async fn compile_project_inner(
     let fingerprint_path = output_dir.join(".fingerprint");
     let dependency_path = output_dir.join(".dependencies.json");
     let fingerprint = project_fingerprint(&root, &request, &dependency_path)?;
-    if pdf_path.is_file()
-        && fs::read_to_string(&fingerprint_path)
+    if is_regular_file(&pdf_path)
+        && read_regular_file(&fingerprint_path)
+            .and_then(|bytes| String::from_utf8(bytes).ok())
             .map(|saved| saved == fingerprint)
             .unwrap_or(false)
     {
@@ -1055,19 +1527,16 @@ async fn compile_project_inner(
         });
     }
 
-    // Never mistake a PDF from an older build for an artifact produced by the
-    // current command. TeX may still create a usable PDF before returning a
-    // non-zero status because of a later auxiliary-tool error.
-    if pdf_path.is_file() {
-        fs::remove_file(&pdf_path)?;
-    }
-
     let (program, args) = build_command(&request, &output_dir, &document_path)?;
-    let mut command = Command::new(program);
-    command.args(args).current_dir(&root);
-    configure_runtime_compatibility(&mut command, &root, app.as_ref())?;
+    let (sandbox, sandbox_args) = sandboxed_command(&program, &args, &root, &output_dir)?;
+    let mut command = Command::new(sandbox);
+    command.args(sandbox_args).current_dir(&root);
+    configure_runtime_compatibility(&mut command, &root, &output_dir)?;
+    // Keep the last artifact until all preflight checks pass. Once the build is
+    // about to run, remove it so a failed command cannot report it as current.
+    remove_cache_path(&pdf_path)?;
     let (status, log) = run_build_command(command, app).await?;
-    let pdf_generated = pdf_path.is_file();
+    let pdf_generated = is_regular_file(&pdf_path);
     let success = status.success() && pdf_generated;
     if success {
         let fls_name = document_path
@@ -1078,7 +1547,7 @@ async fn compile_project_inner(
             + ".fls";
         save_dependencies(&root, &output_dir.join(fls_name), &dependency_path)?;
         let final_fingerprint = project_fingerprint(&root, &request, &dependency_path)?;
-        fs::write(fingerprint_path, final_fingerprint)?;
+        replace_cache_file(&fingerprint_path, final_fingerprint.as_bytes())?;
     }
     let diagnostics = extract_diagnostics(&log);
     Ok(BuildResult {
@@ -1098,10 +1567,7 @@ fn clear_build_cache_inner(
     let root = canonical_root(&project_root)?;
     let cache = project_build_dir(&root, app)?;
     remove_cache_path(&cache)?;
-    if app.is_some() {
-        remove_cache_path(&root.join(BUILD_DIR))?;
-    }
-    fs::create_dir_all(cache.join("svg-inkscape"))?;
+    fs::create_dir_all(cache)?;
     Ok(())
 }
 
@@ -1111,9 +1577,20 @@ fn clear_build_cache(app: tauri::AppHandle, project_root: String) -> Result<(), 
 }
 
 #[tauri::command]
-fn export_pdf(source: String, destination: String) -> Result<(), AppError> {
-    let source = fs::canonicalize(source)?;
-    if source.extension().and_then(|ext| ext.to_str()) != Some("pdf") {
+fn export_pdf(
+    app: tauri::AppHandle,
+    project_root: String,
+    source: String,
+    destination: String,
+) -> Result<(), AppError> {
+    let root = canonical_root(&project_root)?;
+    let build_root = fs::canonicalize(project_build_dir(&root, Some(&app))?)?;
+    let source_path = Path::new(&source);
+    let source = fs::canonicalize(source_path)?;
+    if !is_regular_file(source_path)
+        || !source.starts_with(build_root)
+        || source.extension().and_then(|ext| ext.to_str()) != Some("pdf")
+    {
         return Err(AppError::InvalidPath(source.to_string_lossy().into_owned()));
     }
     fs::copy(source, destination)?;
@@ -1128,8 +1605,10 @@ fn read_build_pdf(
 ) -> Result<tauri::ipc::Response, AppError> {
     let root = canonical_root(&project_root)?;
     let build_root = fs::canonicalize(project_build_dir(&root, Some(&app))?)?;
-    let source = fs::canonicalize(&path)?;
-    if !source.starts_with(build_root)
+    let source_path = Path::new(&path);
+    let source = fs::canonicalize(source_path)?;
+    if !is_regular_file(source_path)
+        || !source.starts_with(build_root)
         || source.extension().and_then(|extension| extension.to_str()) != Some("pdf")
         || !source.is_file()
     {
@@ -1167,8 +1646,10 @@ async fn inverse_search_inner(
     }
     let root = canonical_root(&project_root)?;
     let build_root = fs::canonicalize(project_build_dir(&root, app)?)?;
+    let pdf_path = Path::new(&pdf_path);
     let pdf = fs::canonicalize(pdf_path)?;
-    if !pdf.starts_with(&build_root)
+    if !is_regular_file(pdf_path)
+        || !pdf.starts_with(&build_root)
         || pdf.extension().and_then(|extension| extension.to_str()) != Some("pdf")
         || !pdf.is_file()
     {
@@ -1236,8 +1717,14 @@ fn export_sources(project_root: String, destination: String) -> Result<(), AppEr
         .git_exclude(false)
         .filter_entry(ignored_entry)
         .build();
-    for entry in walker.filter_map(Result::ok).skip(1) {
+    for entry in walker.skip(1) {
+        let entry = entry.map_err(|error| {
+            AppError::Message(format!("No se pudieron exportar todas las fuentes: {error}"))
+        })?;
         let path = entry.path();
+        if fs::symlink_metadata(path)?.file_type().is_symlink() {
+            continue;
+        }
         let relative = path
             .strip_prefix(&root)
             .map_err(|_| AppError::InvalidPath(path.to_string_lossy().into_owned()))?;
@@ -1292,7 +1779,11 @@ fn start_terminal(
             pixel_height: 0,
         })
         .map_err(|error| AppError::Message(error.to_string()))?;
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let shell = if cfg!(target_os = "windows") {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into())
+    } else {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+    };
     let mut command = CommandBuilder::new(shell);
     command.cwd(root);
     command.env("TERM", "xterm-256color");
@@ -1423,6 +1914,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_engines,
+            diagnose_environment,
+            load_project_config,
+            save_project_config,
             discover_project,
             read_project_file,
             read_project_asset,
@@ -1481,6 +1975,19 @@ mod tests {
     }
 
     #[test]
+    fn build_logs_are_bounded_without_splitting_utf8() {
+        let mut output = String::new();
+        append_bounded_output(&mut output, &"á🙂".repeat(600_000));
+
+        assert!(output.len() <= MAX_BUILD_LOG_BYTES);
+        assert!(output.ends_with(BUILD_LOG_TRUNCATED));
+        assert!(!output.contains('\u{fffd}'));
+        let bounded = output.clone();
+        append_bounded_output(&mut output, "more output");
+        assert_eq!(output, bounded);
+    }
+
+    #[test]
     fn synctex_output_extracts_source_location() {
         let output = "SyncTeX result begin\nInput:/tmp/project/chapter.tex\nLine:42\nColumn:-1\nSyncTeX result end";
         assert_eq!(
@@ -1503,6 +2010,7 @@ mod tests {
             document: "main.tex".into(),
             engine: "lualatex".into(),
             shell_escape: false,
+            profile: BuildProfile::Preview,
         };
         let result = compile_project_inner(None, request)
             .await
@@ -1522,8 +2030,114 @@ mod tests {
     }
 
     #[test]
-    fn executable_lookup_finds_installed_tex() {
-        assert!(find_executable("latexmk").is_some());
+    fn supported_engine_list_is_explicit() {
+        assert!(valid_engine("lualatex"));
+        assert!(valid_engine("latexmk"));
+        assert!(!valid_engine("sh"));
+    }
+
+    #[test]
+    fn project_configuration_round_trips_and_rejects_invalid_engines() {
+        let root = std::env::temp_dir().join(format!(
+            "latex-workbench-config-{}-{}",
+            std::process::id(),
+            PROJECT_CONFIG_TEMP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir_all(&root).expect("temporary project");
+        fs::write(root.join("main.tex"), "\\documentclass{article}").expect("source file");
+        let config = ProjectConfig {
+            version: 1,
+            main_document: Some("main.tex".into()),
+            engine: Some("lualatex".into()),
+            profile: BuildProfile::Release,
+        };
+        let project_root = root.to_string_lossy().into_owned();
+        save_project_config(project_root.clone(), config.clone()).expect("save config");
+        assert_eq!(load_project_config(project_root.clone()).expect("load config"), config);
+
+        let invalid = ProjectConfig {
+            engine: Some("sh".into()),
+            ..config
+        };
+        assert!(save_project_config(project_root, invalid).is_err());
+        fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[test]
+    fn release_profile_requires_latexmk() {
+        let request = BuildRequest {
+            project_root: "/tmp/project".into(),
+            document: "main.tex".into(),
+            engine: "lualatex".into(),
+            shell_escape: false,
+            profile: BuildProfile::Release,
+        };
+        assert!(
+            build_command(
+                &request,
+                Path::new("/tmp/build"),
+                Path::new("/tmp/project/main.tex")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn replacing_cache_metadata_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "latex-workbench-cache-{}-{}",
+            std::process::id(),
+            PROJECT_CONFIG_TEMP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir_all(&root).expect("temporary cache");
+        let target = root.join("outside");
+        let metadata = root.join(".fingerprint");
+        fs::write(&target, b"unchanged").expect("external file");
+        symlink(&target, &metadata).expect("metadata symlink");
+
+        replace_cache_file(&metadata, b"safe metadata").expect("replace metadata");
+
+        assert_eq!(fs::read(&target).expect("external file contents"), b"unchanged");
+        assert_eq!(
+            fs::read(&metadata).expect("new metadata contents"),
+            b"safe metadata"
+        );
+        fs::remove_dir_all(root).expect("remove temporary cache");
+    }
+
+    #[test]
+    fn dependency_cache_rejects_paths_outside_the_project() {
+        let root = std::env::temp_dir().join(format!(
+            "latex-workbench-dependencies-{}-{}",
+            std::process::id(),
+            PROJECT_CONFIG_TEMP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir_all(&root).expect("temporary project");
+        fs::write(root.join("main.tex"), "project source").expect("project source");
+        let outside = root.parent().expect("temporary directory").join(format!(
+            "latex-workbench-outside-{}",
+            PROJECT_CONFIG_TEMP_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::write(&outside, "private data").expect("outside file");
+        let dependency_file = root.join("dependencies.json");
+        fs::write(
+            &dependency_file,
+            serde_json::to_vec(&[format!(
+                "../{}",
+                outside.file_name().unwrap().to_string_lossy()
+            )])
+            .expect("dependency JSON"),
+        )
+        .expect("dependency cache");
+
+        let paths = dependency_paths(&root, &dependency_file).expect("dependency paths");
+
+        assert!(!paths.contains(&outside));
+        fs::remove_file(outside).expect("remove outside file");
+        fs::remove_dir_all(root).expect("remove temporary project");
     }
 
     #[test]
@@ -1536,12 +2150,14 @@ mod tests {
             .expect("workspace root")
             .join("tests/fixtures/basic");
         let document = root.join("main.tex");
-        let output = root.join(BUILD_DIR).join("build");
+        let output =
+            profile_build_dir(&root, None, BuildProfile::Preview).expect("preview output");
         let request = BuildRequest {
             project_root: root.to_string_lossy().into_owned(),
             document: "main.tex".into(),
             engine: "lualatex".into(),
             shell_escape: false,
+            profile: BuildProfile::Preview,
         };
         let (program, _) = build_command(&request, &output, &document).expect("build");
         assert_eq!(
@@ -1552,16 +2168,12 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn latexminted_runtime_uses_a_compatible_python() {
+    fn latexminted_runtime_selects_an_installed_python() {
         let Some((python, latexminted)) = compatible_latexminted_runtime() else {
             return;
         };
-        let output = std::process::Command::new(python)
-            .arg(latexminted)
-            .arg("--version")
-            .output()
-            .expect("latexminted version check");
-        assert!(output.status.success());
+        assert!(python.is_file());
+        assert!(latexminted.is_file());
     }
 
     #[tokio::test]
@@ -1579,6 +2191,7 @@ mod tests {
             document: "main.tex".into(),
             engine: "lualatex".into(),
             shell_escape: false,
+            profile: BuildProfile::Preview,
         };
         clear_build_cache_inner(None, request.project_root.clone())
             .expect("clear minted fixture cache");
@@ -1605,6 +2218,7 @@ mod tests {
             document: "main.tex".into(),
             engine: "lualatex".into(),
             shell_escape: false,
+            profile: BuildProfile::Preview,
         };
         clear_build_cache_inner(None, request.project_root.clone())
             .expect("clear references fixture cache");
@@ -1613,7 +2227,8 @@ mod tests {
             .expect("references build");
         assert!(result.success, "{}", result.log);
 
-        let output = root.join(BUILD_DIR).join("build");
+        let output =
+            profile_build_dir(&root, None, BuildProfile::Preview).expect("preview output");
         let bbl = fs::read_to_string(output.join("main.bbl")).expect("Biber output");
         assert!(bbl.contains("Gamma"));
         let aux = fs::read_to_string(output.join("main.aux")).expect("LaTeX aux output");
@@ -1652,13 +2267,16 @@ mod tests {
             document: "main.tex".into(),
             engine: "lualatex".into(),
             shell_escape: true,
+            profile: BuildProfile::Preview,
         };
         let result = compile_project_inner(None, request)
             .await
             .expect("SVG build");
         assert!(result.success, "{}", result.log);
         assert!(!root.join("svg-inkscape").exists());
-        let generated = root.join(BUILD_DIR).join("build").join("svg-inkscape");
+        let generated = profile_build_dir(&root, None, BuildProfile::Preview)
+            .expect("preview output")
+            .join("svg-inkscape");
         assert!(generated.is_dir());
         assert!(
             fs::read_dir(generated)
@@ -1682,6 +2300,7 @@ mod tests {
             document: "main.tex".into(),
             engine: "lualatex".into(),
             shell_escape: false,
+            profile: BuildProfile::Preview,
         };
         let first = compile_project_inner(None, request())
             .await

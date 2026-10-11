@@ -1,4 +1,4 @@
-name: macOS release
+name: Desktop release
 
 on:
   push:
@@ -6,11 +6,28 @@ on:
 
 jobs:
   bundle:
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --bundles app,dmg
+          - platform: ubuntu-22.04
+            args: ""
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            bubblewrap build-essential curl file libayatana-appindicator3-dev \
+            libssl-dev librsvg2-dev libwebkit2gtk-4.1-dev patchelf
       - uses: pnpm/action-setup@v4
         with:
           version: 11.25.0
@@ -20,9 +37,13 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install --frozen-lockfile
-      - run: pnpm tauri build --bundles app
-      - name: Empaquetar aplicación
-        run: ditto -c -k --sequesterRsrc --keepParent "src-tauri/target/release/bundle/macos/Latex Workbench.app" "Latex-Workbench-macOS-arm64.zip"
-      - uses: softprops/action-gh-release@v2
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          files: Latex-Workbench-macOS-arm64.zip
+          tagName: ${{ github.ref_name }}
+          releaseName: Latex Workbench ${{ github.ref_name }}
+          releaseBody: Consulta el registro de cambios para esta versión.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
