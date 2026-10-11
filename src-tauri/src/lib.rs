@@ -1572,6 +1572,7 @@ fn build_command_paths(
 ) -> Result<(PathBuf, PathBuf), AppError> {
     #[cfg(target_os = "windows")]
     {
+        let _ = output_dir;
         let relative_document = document_path
             .strip_prefix(root)
             .map_err(|_| AppError::InvalidPath(document_path.to_string_lossy().into_owned()))?;
